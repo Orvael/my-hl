@@ -29,6 +29,7 @@ class Engine:
         self.last_partial_ts = {}
         self.premium_samples = {}
         self.premium_samples_ts = {}
+        self.builder = None  # (builder_addr, fee_bps) set per API order
 
     def mark(self, coin):
         """specs/06 robust mark; falls back to oracle if never computed."""
@@ -65,6 +66,10 @@ class Engine:
             notl = f["px"] * f["sz"] // SCALE
             fee_t = qdiv(notl * TAKER_FEE, SCALE)
             fee_m = qdiv(notl * MAKER_FEE, SCALE)
+            if self.builder:
+                fee_b = qdiv(notl * self.builder[1], 10_000)
+                fee_t += fee_b
+                self.ch.acc(self.builder[0]).usd += fee_b
             self.ch.acc(user).usd -= fee_t
             self.ch.acc(VAULT_FEES).usd += fee_t
             maker = f["maker_user"]
