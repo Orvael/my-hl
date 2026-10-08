@@ -4,6 +4,7 @@ from .num import qdiv, notional
 from .book import OrderBook, STATUS_FILLED, STATUS_RESTED, STATUS_CANCELED
 from .clearing import ClearingHouse, VAULT_FEES, VAULT_HLP, VAULT_ADL
 from .oracle import MarkEngine
+from .triggers import TriggerStore, Trigger, Twap
 from .types import Order, TIFS
 
 LIQ = "LIQ"  # pseudo-user for forced closes
@@ -22,6 +23,7 @@ class Engine:
         self.ext = {}
         self.mark_engine = MarkEngine()
         self.marks = {}
+        self.trig = TriggerStore()
 
     def mark(self, coin):
         """specs/06 robust mark; falls back to oracle if never computed."""
@@ -65,6 +67,8 @@ class Engine:
             self.ch.acc(VAULT_FEES).usd += fee_m
             self.ch.apply_side(user, coin, is_buy, f["px"], f["sz"], 0)
             self.ch.apply_side(maker, coin, not is_buy, f["px"], f["sz"], 0)
+            if f["maker_oid"] not in self.books[coin].orders:
+                self.trig.promote_children(f["maker_oid"])
 
     def px_valid(self, coin, px):
         """specs/05: <=5 sig figs AND <= (6 - szDecimals) decimals; integers always OK."""
@@ -83,7 +87,9 @@ class Engine:
         sd = self.assets[coin]["sz_decimals"]
         return sz % (10 ** (8 - sd)) == 0
 
-    def place(self, user, coin, is_buy, px, sz, tif="GTC", reduce_only=False):
+    def place(self, user, coin, is_buy, px, sz, tif="GTC", reduce_only=False,
+              tp=None, sl=None):
+        """tp/sl: OCO child specs {kind, trigger_px, limit_px?} (specs/08)."""
         if coin not in self.assets:
             return None, "no_coin"
         if tif not in TIFS:
@@ -107,7 +113,113 @@ class Engine:
         o = Order(oid, user, coin, is_buy, px, sz, sz, tif, reduce_only)
         status, fills = self.books[coin].place(o)
         self._settle_fills(user, coin, is_buy, fills)
+        if tp or sl:
+            if status == "filled":
+                self._place_children(user, coin, is_buy, sz, tp, sl)
+            elif status == "rested":
+                self._register_pending(user, coin, is_buy, sz, oid, tp, sl)
         return status, fills
+
+    def _child_fire(self, close_is_buy, kind):
+        if kind == "tp":
+            return "below" if close_is_buy else "above"
+        return "above" if close_is_buy else "below"
+
+    def _child_trigger(self, user, coin, close_is_buy, kind, spec, sz, parent_oid):
+        fire = self._child_fire(close_is_buy, kind)
+        return Trigger(user, coin, close_is_buy, fire, kind,
+                       spec.get("order_kind", "market"),
+                       spec["trigger_px"], spec.get("limit_px"), sz,
+                       parent_oid=parent_oid)
+
+    def _register_pending(self, user, coin, is_buy, sz, oid, tp, sl):
+        for spec, kind in ((tp, "tp"), (sl, "sl")):
+            if spec:
+                self.trig.add(self._child_trigger(user, coin, not is_buy,
+                                                  kind, spec, sz, oid))
+
+    def _place_children(self, user, coin, is_buy, sz, tp, sl):
+        self._register_pending(user, coin, is_buy, sz, None, tp, sl)
+
+    def trigger_pass(self, marks):
+        """specs/08: fire triggers on mark, deterministic (registration order)."""
+        events = []
+        for t in list(self.trig.triggers):
+            if t.parent_oid is not None:
+                continue  # pending children wait for their parent fill
+            mark = marks.get(t.coin)
+            if mark is None:
+                continue
+            hit = (mark <= t.trigger_px) if t.fire == "below" else (mark >= t.trigger_px)
+            if not hit:
+                continue
+            pos = self.ch.acc(t.user).positions.get(t.coin)
+            sz = t.sz if t.sz is not None else (abs(pos.szi) if pos else 0)
+            self.trig.remove(t)
+            if sz == 0:
+                events.append({"t": "trigger_skip", "user": t.user, "kind": t.kind})
+                continue
+            if t.order_kind == "market":
+                lim = qdiv(t.trigger_px * (110 if t.is_buy else 90), 100)
+            else:
+                lim = t.limit_px or t.trigger_px
+            st, fills = self.place(t.user, t.coin, t.is_buy, lim, sz, "IOC",
+                                   True)
+            events.append({"t": "trigger_fire", "kind": t.kind, "user": t.user,
+                           "fills": len(fills)})
+        return events
+
+    def twap_pass(self, marks):
+        """specs/08: target = elapsed/total * size; catch-up suborders <= 3x base;
+        per-suborder px bound = mark +/- 3%."""
+        events = []
+        for tw in list(self.trig.twaps):
+            elapsed = self.block_ts - tw.start_ts
+            if elapsed <= 0:
+                continue
+            target = qdiv(elapsed * tw.total_sz, tw.duration_s)
+            base = qdiv(tw.total_sz * 30, tw.duration_s)
+            if base == 0:
+                base = tw.total_sz
+            guard = 0
+            while tw.filled_sz < target and guard < 50:
+                guard += 1
+                need = target - tw.filled_sz
+                sz = min(3 * base, need)
+                mark = marks.get(tw.coin)
+                if mark is None:
+                    break
+                lim = qdiv(mark * (103 if tw.is_buy else 97), 100)
+                st, fills = self.place(tw.user, tw.coin, tw.is_buy, lim, sz,
+                                       "IOC", tw.reduce_only)
+                got = sum(f["sz"] for f in fills)
+                tw.filled_sz += got
+                if got == 0:
+                    break
+            if tw.filled_sz >= tw.total_sz or elapsed >= tw.duration_s:
+                self.trig.twaps.remove(tw)
+                events.append({"t": "twap_done", "user": tw.user,
+                               "filled": tw.filled_sz})
+        return events
+
+    def place_trigger(self, user, coin, is_buy, fire, kind, order_kind,
+                      trigger_px, limit_px=None, sz=None, parent_oid=None):
+        """specs/08: stop-sell fires 'below' (trigger < mid at placement),
+        take-sell 'above' (trigger > mid); mirrored for buys."""
+        mid = self.books[coin].mid()
+        if mid is None:
+            mid = self.oracles.get(coin)
+        if mid is None:
+            return "no_mid"
+        if mid is None:
+            return "no_mid"
+        if fire == "below" and trigger_px >= mid:
+            return "bad_trigger"
+        if fire == "above" and trigger_px <= mid:
+            return "bad_trigger"
+        self.trig.add(Trigger(user, coin, is_buy, fire, kind, order_kind,
+                              trigger_px, limit_px, sz, parent_oid))
+        return "ok"
 
     def deposit(self, user, usd):
         self.ch.acc(user).usd += usd
@@ -269,6 +381,18 @@ class Engine:
                 self.set_oracle(a["coin"], a["px"])
             elif t == "ext_px":
                 self.ext.setdefault(a["coin"], {})[a["src"]] = a["px"]
+            elif t == "place_trigger":
+                r = self.place_trigger(a["user"], a["coin"], a["is_buy"],
+                                       a["fire"], a["kind"], a.get("order_kind", "market"),
+                                       a["trigger_px"], a.get("limit_px"),
+                                       a.get("sz"), a.get("parent_oid"))
+                if r != "ok":
+                    events.append({"t": "reject", "op": "place_trigger", "why": r})
+            elif t == "twap":
+                self.trig.twaps.append(Twap(a["user"], a["coin"], a["is_buy"],
+                                            a["sz"], self.block_ts,
+                                            a["duration_s"],
+                                            a.get("reduce_only", False)))
             elif t == "place":
                 st, fills = self.place(a["user"], a["coin"], a["is_buy"],
                                        a["px"], a["sz"], a.get("tif", "GTC"),
@@ -278,11 +402,14 @@ class Engine:
                 elif st == "canceled":
                     events.append({"t": "cancel", "oid": a.get("oid"), "user": a["user"]})
             elif t == "cancel":
-                self.books[a["coin"]].cancel(a["oid"])
+                if self.books[a["coin"]].cancel(a["oid"]):
+                    self.trig.cancel_children(a["oid"])
             else:
                 events.append({"t": "reject", "op": str(t)})
         self.update_marks()
-        events.extend(self.settle_funding_if_due())
         marks = {c: self.mark(c) for c in self.assets}
+        events.extend(self.twap_pass(marks))
+        events.extend(self.trigger_pass(marks))
+        events.extend(self.settle_funding_if_due())
         events.extend(self.liq_pass(marks))
         return events
