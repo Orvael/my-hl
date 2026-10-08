@@ -208,11 +208,12 @@ class ClearingHouse:
             total += delta
         return total
 
-    def backstop_transfer(self, user):
-        """specs/03: cross backstop = balance + all cross positions to vault_hlp.
-        v1: positions transfer unpriced (docs silent on backstop fill pricing)."""
+    def backstop_transfer(self, user, dex=None):
+        """specs/03 + specs/10: cross backstop to the HLP vault; HIP-3 dex
+        assets route to that dex's own backstop liquidator account."""
         a = self.acc(user)
-        v = self.acc(VAULT_HLP)
+        vault_name = "vault_hlp_dex_%s" % dex if dex else VAULT_HLP
+        v = self.acc(vault_name)
         v.usd += a.usd
         for coin, pos in a.positions.items():
             if pos.szi == 0:

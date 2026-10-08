@@ -104,6 +104,25 @@ class Hip3Store:
         d["halted"][coin] = True
         return True
 
+    def reserves_x10(self):
+        """specs/10: 7 + 0.2 * n_auction_deployments, scaled by 10."""
+        return 70 + 2 * self.n_auction_deployments
+
+    def use_reserve(self, user, dex_name, coin, ts):
+        """Reserve deployment: current auction px, bypasses the timer."""
+        d = self.dexes.get(dex_name)
+        if d is None or d["deployer"] != user:
+            return False, "no_dex"
+        if self.reserves_x10() < 10:
+            return False, "no_reserves"
+        if not self.auction:
+            return False, "no_auction"
+        px = self.auction_px(ts)
+        self.auction = None
+        self.n_auction_deployments += 1
+        d["assets"].append(coin)
+        return True, px
+
     def resume(self, user, dex_name, coin):
         d = self.dexes.get(dex_name)
         if d is None or d["deployer"] != user:

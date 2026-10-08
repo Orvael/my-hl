@@ -1,6 +1,7 @@
 # Created: WIB 2026-10-08 14:4x — engine: deterministic state machine (my-hl)
-from .config import SCALE, TAKER_FEE, MAKER_FEE
-from .num import qdiv, notional
+from .config import (SCALE, TAKER_FEE, MAKER_FEE, INTEREST_8H,
+                     FUNDING_CLAMP, FUNDING_CAP)
+from .num import qdiv, notional, clamp
 from .book import OrderBook, STATUS_FILLED, STATUS_RESTED, STATUS_CANCELED
 from .clearing import ClearingHouse, VAULT_FEES, VAULT_HLP, VAULT_ADL
 from .oracle import MarkEngine
@@ -26,6 +27,8 @@ class Engine:
         self.trig = TriggerStore()
         self.partial_liq_threshold = 100_000 * SCALE
         self.last_partial_ts = {}
+        self.premium_samples = {}
+        self.premium_samples_ts = {}
 
     def mark(self, coin):
         """specs/06 robust mark; falls back to oracle if never computed."""
@@ -292,21 +295,49 @@ class Engine:
             return None
         return qdiv(acc_px_sz, filled)
 
+    def sample_premiums(self):
+        """specs/01 (upgrade): premium sampled every 5s of block time,
+        averaged over the hour for the settle."""
+        for coin in sorted(self.assets):
+            oracle = self.oracles.get(coin)
+            if oracle is None:
+                continue
+            last = self.premium_samples_ts.get(coin, 0)
+            if self.block_ts - last < 5:
+                continue
+            self.premium_samples_ts[coin] = self.block_ts
+            ib = self.impact_bid(coin, oracle)
+            ia = self.impact_ask(coin, oracle)
+            if ib is None or ia is None:
+                continue
+            diff = max(ib - oracle, 0) - max(oracle - ia, 0)
+            prem = qdiv(diff * SCALE, oracle)
+            self.premium_samples.setdefault(coin, []).append(
+                (self.block_ts, prem))
+
     def settle_funding_if_due(self):
-        """Hourly boundary crossed since last settle -> compute F from our book
-        and settle (v1: one sample per boundary, see specs/01 simplification)."""
+        """specs/01: F = avg(premium samples over the interval)
+        + clamp(interest - avg, +/-0.0005); 4%/h cap; paid at F/8."""
         events = []
+        self.sample_premiums()
         if self.block_ts - self.last_funding_ts < 3600:
             return events
         hours = qdiv(self.block_ts - self.last_funding_ts, 3600)
         self.last_funding_ts += hours * 3600
         for coin in sorted(self.assets):
             oracle = self.oracles.get(coin)
-            ib = self.impact_bid(coin, oracle)
-            ia = self.impact_ask(coin, oracle)
-            if oracle is None or ib is None or ia is None:
+            if oracle is None:
                 continue
-            F8 = self.ch.funding_rate(ib, ia, oracle)
+            samples = [p for (t, p) in self.premium_samples.get(coin, [])
+                       if t <= self.last_funding_ts]
+            if not samples:
+                continue
+            self.premium_samples[coin] = [
+                (t, p) for (t, p) in self.premium_samples.get(coin, [])
+                if t > self.last_funding_ts]
+            prem_avg = qdiv(sum(samples), len(samples))
+            clamped = clamp(INTEREST_8H - prem_avg, -FUNDING_CLAMP, FUNDING_CLAMP)
+            F8 = clamp(prem_avg + clamped, -FUNDING_CAP, FUNDING_CAP)
             tot = self.ch.funding_settle(coin, F8, oracle)
             events.append({"t": "funding", "coin": coin, "f8": F8, "total": tot})
         return events
@@ -347,7 +378,13 @@ class Engine:
                 if eq >= mreq or not acc.positions:
                     break
                 if eq < qdiv(2 * mreq, 3):
-                    self.ch.backstop_transfer(user)
+                    big = max((c for c, p in acc.positions.items()
+                               if not p.is_isolated),
+                              key=lambda c: notional(marks_live.get(c, 0),
+                                                     abs(acc.positions[c].szi)),
+                              default=None)
+                    dex = big.split(":")[0] if big and ":" in big else None
+                    self.ch.backstop_transfer(user, dex=dex)
                     events.append({"t": "backstop", "user": user})
                     break
                 coin = max(acc.positions,

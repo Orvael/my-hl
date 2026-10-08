@@ -40,10 +40,56 @@ class Twap:
         self.reduce_only = reduce_only
 
 
+class TrailingStop:
+    """specs/08: market order when mark retraces from its best level since
+    activation. Close-long (sell) trails the highest mark; close-short (buy)
+    trails the lowest. Trigger never moves backward."""
+
+    __slots__ = ("user", "coin", "is_buy", "distance", "is_pct", "best",
+                 "reduce_only")
+
+    def __init__(self, user, coin, is_buy, distance, is_pct=False,
+                 reduce_only=True):
+        self.user = user
+        self.coin = coin
+        self.is_buy = is_buy
+        self.distance = distance
+        self.is_pct = is_pct
+        self.best = None    # highest mark (sell) or lowest mark (buy)
+        self.reduce_only = reduce_only
+
+    def on_mark(self, mark):
+        """Returns trigger px when fired, else None."""
+        if self.is_buy:
+            if self.best is None or mark < self.best:
+                self.best = mark
+        else:
+            if self.best is None or mark > self.best:
+                self.best = mark
+        if self.is_pct:
+            thr = qdiv(self.best * (SCALE + self.distance if self.is_buy
+                                    else SCALE - self.distance), SCALE)
+        else:
+            thr = self.best + self.distance if self.is_buy \
+                else self.best - self.distance
+        fired = mark >= thr if self.is_buy else mark <= thr
+        return thr if fired else None
+
+
 class TriggerStore:
     def __init__(self):
         self.triggers = []   # active + pending (parent_oid != None = pending)
         self.twaps = []
+        self.trailing = []   # TrailingStop list
+
+    def scale_orders(self, user, coin, is_buy, px_lo, px_hi, n, sz_each,
+                     tif="ALO"):
+        """specs/08 Scale: n limit orders across a price range."""
+        out = []
+        step = qdiv(px_hi - px_lo, n - 1) if n > 1 else 0
+        for i in range(n):
+            out.append((px_lo + i * step, sz_each))
+        return out
 
     def add(self, t):
         self.triggers.append(t)
