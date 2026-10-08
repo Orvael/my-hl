@@ -20,7 +20,14 @@ PORT = int(os.environ.get("MYHL_PORT", "8770"))
 BLOCK_S = 2
 
 ASSETS = {"BTC": {"max_leverage": 20, "sz_decimals": 2,
-                  "impact_notional_usd": 6_000 * S}}
+                  "impact_notional_usd": 6_000 * S},
+          "ETH": {"max_leverage": 20, "sz_decimals": 2,
+                  "impact_notional_usd": 3_000 * S},
+          "SOL": {"max_leverage": 20, "sz_decimals": 2,
+                  "impact_notional_usd": 2_000 * S},
+          "HYPE": {"max_leverage": 15, "sz_decimals": 2,
+                   "impact_notional_usd": 2_000 * S}}
+SEED_MIDS = {"BTC": 82_000, "ETH": 3_150, "SOL": 148, "HYPE": 28}
 
 
 def main():
@@ -42,7 +49,8 @@ def main():
     api = ApiState(Engine(ASSETS), spot=spot,
                    staking=staking, vault=vault, vault_factory=vfactory)
     e = api.engine
-    e.set_oracle("BTC", 82_000 * S)
+    for c0, m0 in SEED_MIDS.items():
+        e.set_oracle(c0, m0 * S)
 
     # spot: PURR/USDC seeded + Hyperliquidity quoting
     pidx, _ = spot.deploy("PURR", 5, 0, 600_000_000 * 10 ** 5, "system", {})
@@ -56,18 +64,22 @@ def main():
     vault.deposit("treasury", 5_000_000 * S, 0, marks0)
 
     # genesis block: oracle + liquidity seed (each order under the $5M cap)
-    seed = [{"t": "oracle", "coin": "BTC", "px": 82_000 * S},
-            {"t": "deposit", "user": "lp_bot", "usd": 50_000_000 * S}]
+    seed = [{"t": "oracle", "coin": c0, "px": m0 * S}
+            for c0, m0 in SEED_MIDS.items()]
+    seed.append({"t": "deposit", "user": "lp_bot", "usd": 50_000_000 * S})
     e.apply_block(0, seed)
     chain.submit(0, seed)
-    for lvl in range(6):
-        for side_px, is_buy in ((81_900 - lvl * 10, True),
-                                (82_100 + lvl * 10, False)):
-            a = {"t": "place", "user": "lp_bot", "coin": "BTC",
-                 "is_buy": is_buy, "px": side_px * S, "sz": 40 * S,
-                 "tif": "ALO"}
-            e.apply_block(0, [a])
-            chain.submit(0, [a])
+    for c0, m0 in SEED_MIDS.items():
+        off = max(1, m0 * 13 // 10_000)   # ~0.13% seed spread
+        step = max(1, m0 // 8_000)
+        for lvl in range(6):
+            for side_px, is_buy in ((m0 - off - lvl * step, True),
+                                    (m0 + off + lvl * step, False)):
+                a = {"t": "place", "user": "lp_bot", "coin": c0,
+                     "is_buy": is_buy, "px": side_px * S, "sz": 40 * S,
+                     "tif": "ALO"}
+                e.apply_block(0, [a])
+                chain.submit(0, [a])
 
     srv = make_server(api, chain=chain, host="0.0.0.0", port=PORT)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -90,47 +102,56 @@ def main():
         return api.exchange({"action": action, "nonce": nonce[0],
                              "signature": {"signer": user}})
 
-    last_quote = 0
     tick = 0
     checks = ok = 0
-    drift = 0.0
+    leader_hash = None
+    drift = {c: 0.0 for c in ASSETS}
     while True:
         time.sleep(0.4)
         tick += 1
-        b = e.books["BTC"]
-        mid = b.mid() or e.oracles["BTC"]
-        # momentum random walk: persistent drift moves the mid over time
-        drift += rng.gauss(0, 0.18)
-        drift = max(-0.34, min(0.34, drift))
-        if rng.random() < 0.65:
-            side = rng.random() < (0.5 + drift)
-            sz = rng.randint(2, 20) * S
-            px = (mid * 1009 // 1000) // S * S if side else (mid * 991 // 1000) // S * S
-            bot("sim_bot", {"type": "order", "orders": [
-                {"coin": "BTC", "is_buy": bool(side), "limit_px": px,
-                 "sz": sz, "tif": "IOC"}]})
-            # oracle follows the market (validators publish market prices)
-            if tick % 3 == 0:
-                new_oracle = mid + (mid // 400) * (1 if drift > 0.05 else
-                                                   (-1 if drift < -0.05 else 0))
-                bot("oracle_feed", {"type": "oracle", "coin": "BTC",
-                                    "px": new_oracle})
-        # lp re-quotes every 1s around the moving mid (int ticks, via API)
+        mids = {}
+        for coin in ASSETS:
+            b = e.books[coin]
+            mid = b.mid() or e.oracles[coin]
+            mids[coin] = mid
+            # momentum random walk per market: drift moves the mid over time
+            drift[coin] = max(-0.34, min(0.34,
+                drift[coin] + rng.gauss(0, 0.18)))
+            if rng.random() < 0.55:
+                side = rng.random() < (0.5 + drift[coin])
+                sz = rng.randint(2, 20) * S
+                px = (mid * 1009 // 1000) // S * S if side else \
+                    (mid * 991 // 1000) // S * S
+                bot("sim_bot", {"type": "order", "orders": [
+                    {"coin": coin, "is_buy": bool(side), "limit_px": px,
+                     "sz": sz, "tif": "IOC"}]})
+                # oracle follows the market (validators publish prices)
+                if tick % 3 == 0:
+                    new_oracle = mid + (mid // 400) * (
+                        1 if drift[coin] > 0.05 else
+                        (-1 if drift[coin] < -0.05 else 0))
+                    bot("oracle_feed", {"type": "oracle", "coin": coin,
+                                        "px": new_oracle})
+        # lp re-quotes every 1s around each moving mid (via API)
         if tick % 2 == 0:
-            for oid in list(b.orders):
-                if b.orders[oid].user == "lp_bot":
-                    bot("lp_bot", {"type": "cancel", "coin": "BTC", "oid": oid})
-            m2 = b.mid() or mid
-            half = m2 // 200  # 0.05% base spread
-            sk = int(drift * 100)  # momentum MIGRATES the band midpoint
-            for i in range(3):
-                for is_buy in (True, False):
-                    base = m2 + sk * 2 * S  # both sides shift with drift
-                    px_off = (base + (half + i * 5 * S) * (1 if not is_buy
-                                                           else -1)) // S * S
-                    bot("lp_bot", {"type": "order", "orders": [
-                        {"coin": "BTC", "is_buy": is_buy, "limit_px": px_off,
-                         "sz": 50 * S, "tif": "ALO"}]})
+            for coin in ASSETS:
+                bb = e.books[coin]
+                for oid in list(bb.orders):
+                    if bb.orders[oid].user == "lp_bot":
+                        bot("lp_bot", {"type": "cancel", "coin": coin,
+                                       "oid": oid})
+                m2 = bb.mid() or mids[coin]
+                half = m2 // 200  # 0.05% base spread
+                sk = int(drift[coin] * 100)
+                for i in range(3):
+                    for is_buy in (True, False):
+                        base = m2 + sk * 2 * S
+                        px_off = (base + (half + i * 5 * S) *
+                                  (1 if not is_buy else -1)) // S * S
+                        bot("lp_bot", {"type": "order", "orders": [
+                            {"coin": coin, "is_buy": is_buy,
+                             "limit_px": px_off, "sz": 50 * S,
+                             "tif": "ALO"}]})
         # --- block production: atomic drain + passes + submit ---
         # The leader (api engine) applied actions at dispatch; the passes run
         # here under the same lock and timestamp as the replicas' apply_block,
@@ -168,9 +189,9 @@ def main():
                     print("MISMATCH h%d key=%s" % (
                         chain.head().header["height"], key), flush=True)
         if tick % 10 == 0:
-            print("t%d bids %d asks %d mid %.1f | blocks %d agree %d"
-                  % (tick, len(b.bids), len(b.asks), mid / 1e8, checks, ok),
-                  flush=True)
+            b = e.books["BTC"]
+            print("t%d BTC mid %.1f | blocks %d agree %d"
+                  % (tick, mids["BTC"] / 1e8, checks, ok), flush=True)
 
 
 def _mk_pos(coin, szi, px):
