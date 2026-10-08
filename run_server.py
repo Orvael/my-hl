@@ -19,15 +19,22 @@ S = SCALE
 PORT = int(os.environ.get("MYHL_PORT", "8770"))
 BLOCK_S = 2
 
-ASSETS = {"BTC": {"max_leverage": 20, "sz_decimals": 2,
-                  "impact_notional_usd": 6_000 * S},
-          "ETH": {"max_leverage": 20, "sz_decimals": 2,
-                  "impact_notional_usd": 3_000 * S},
+# Real Hyperliquid majors — leverage per the verified margin-tiers table,
+# impact notional 20k BTC/ETH + 6k others (specs/07).
+ASSETS = {"BTC": {"max_leverage": 40, "sz_decimals": 5,
+                  "impact_notional_usd": 20_000 * S},
+          "ETH": {"max_leverage": 25, "sz_decimals": 4,
+                  "impact_notional_usd": 20_000 * S},
           "SOL": {"max_leverage": 20, "sz_decimals": 2,
-                  "impact_notional_usd": 2_000 * S},
-          "HYPE": {"max_leverage": 15, "sz_decimals": 2,
-                   "impact_notional_usd": 2_000 * S}}
-SEED_MIDS = {"BTC": 82_000, "ETH": 3_150, "SOL": 148, "HYPE": 28}
+                  "impact_notional_usd": 6_000 * S},
+          "XRP": {"max_leverage": 20, "sz_decimals": 1,
+                  "impact_notional_usd": 6_000 * S},
+          "DOGE": {"max_leverage": 10, "sz_decimals": 0,
+                   "impact_notional_usd": 6_000 * S},
+          "HYPE": {"max_leverage": 10, "sz_decimals": 2,
+                   "impact_notional_usd": 6_000 * S}}
+SEED_MIDS = {"BTC": 82_000, "ETH": 3_150, "SOL": 148, "XRP": 2.4,
+             "DOGE": 0.16, "HYPE": 28}
 
 
 def main():
