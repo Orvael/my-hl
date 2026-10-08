@@ -5,10 +5,9 @@ WIB 2026-10-08 14:4x. Deterministic single-node perp exchange, built as an
 imitation of Hyperliquid's HyperCore design.
 
 Basis: specs/ = distilled from LIVE Hyperliquid docs, fetched and verified
-WIB 2026-10-08 13:5x (funding, margining, liquidations, entry/PnL, order
-types, tick/lot, ADL, fees). The master reference the user compiled
-(~/Downloads/Hyperliquid-Master-Reference.md) had its engine claims
-re-verified against those live pages.
+2026-10-08 (funding, margining, liquidations, entry/PnL, order
+types, tick/lot, ADL, fees). An independently compiled reference document's
+engine claims were re-verified against those live pages.
 
 ## Run
 
