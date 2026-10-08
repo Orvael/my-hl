@@ -15,6 +15,17 @@ from .config import SCALE
 MAX_NONCES = 10_000
 
 
+def _ws_frame(text):
+    """Server->client text frame (unmasked, RFC6455)."""
+    data = text.encode()
+    ln = len(data)
+    if ln < 126:
+        return bytes([0x81, ln]) + data
+    if ln < 65536:
+        return bytes([0x81, 126]) + ln.to_bytes(2, "big") + data
+    return bytes([0x81, 127]) + ln.to_bytes(8, "big") + data
+
+
 def fmt_px(px):
     return str(qdiv(px, 10 ** 6) / 10 ** 2) if px is not None else None
 
@@ -311,7 +322,59 @@ def make_server(api_state, chain=None, host="127.0.0.1", port=0):
             self.end_headers()
             self.wfile.write(body)
 
+        def _ws_upgrade(self):
+            """specs/14: RFC6455 server push of {book, mid, trades}.
+            Server frames are unmasked; one text frame per tick."""
+            key = self.headers.get("Sec-WebSocket-Key")
+            if not key:
+                return self._json(400, {"error": "no_ws_key"})
+            import base64 as b64
+            import hashlib
+            accept = b64.b64encode(
+                hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+                             .encode()).digest()).decode()
+            self.send_response(101)
+            self.send_header("Upgrade", "websocket")
+            self.send_header("Connection", "Upgrade")
+            self.send_header("Sec-WebSocket-Accept", accept)
+            self.end_headers()
+            try:
+                coin = "BTC"
+                while True:
+                    with api_state.lock:
+                        b = api_state.engine.books.get(coin)
+                        bb = b.best_bid() if b else None
+                        ba = b.best_ask() if b else None
+
+                        def lvls(side, rev):
+                            out = []
+                            for px in sorted(side, reverse=rev)[:12]:
+                                tot = sum(o.sz_rem for o in side[px])
+                                out.append([px / 1e8,
+                                            tot / 1e8, len(side[px])])
+                            return out
+                        payload = {
+                            "t": int(time.time() * 1000),
+                            "bids": lvls(b.bids, True) if b else [],
+                            "asks": lvls(b.asks, False) if b else [],
+                            "mid": (bb + ba) / 2e8 if bb and ba else None,
+                            "trades": [{"px": ev["px"] / 1e8,
+                                        "sz": ev["sz"] / 1e8,
+                                        "buy": ev["is_buy"]}
+                                       for ev in api_state.events[-40:]
+                                       if ev.get("t") == "fill"],
+                        }
+                    frame = _ws_frame(json.dumps(payload, separators=(",", ":")))
+                    self.wfile.write(frame)
+                    self.wfile.flush()
+                    time.sleep(0.3)
+            except Exception:
+                return
+
         def do_GET(self):
+            if self.path == "/ws":
+                self._ws_upgrade()
+                return
             if self.path == "/" or self.path.startswith("/index"):
                 with open(static_path, "rb") as fp:
                     return self._html(200, fp.read())
@@ -320,8 +383,7 @@ def make_server(api_state, chain=None, host="127.0.0.1", port=0):
             if self.path == "/chain/latest":
                 if chain is None:
                     return self._json(404, {"error": "no_chain"})
-                h = chain.head().header
-                return self._json(200, {"header": h})
+                return self._json(200, {"header": chain.head().header})
             if self.path.startswith("/block/"):
                 if chain is None:
                     return self._json(404, {"error": "no_chain"})

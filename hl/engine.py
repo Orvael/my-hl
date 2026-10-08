@@ -520,6 +520,19 @@ class Engine:
                                "coin": coin, "sz": close_sz})
         return events
 
+    def run_passes(self, ts):
+        """specs/14: the end-of-block passes standalone, so a live API engine
+        mirrors apply_block's semantics exactly (marks, triggers, funding, liq)."""
+        self.block_ts = ts
+        self.update_marks()
+        marks = {c: self.mark(c) for c in self.assets}
+        events = []
+        events.extend(self.twap_pass(marks))
+        events.extend(self.trigger_pass(marks))
+        events.extend(self.settle_funding_if_due())
+        events.extend(self.liq_pass(marks))
+        return events
+
     def apply_block(self, ts, actions):
         """One deterministic block: user actions in order, then end-of-block
         passes (funding boundary -> liquidations -> ADL). Returns events."""
