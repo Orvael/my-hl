@@ -27,15 +27,18 @@ def main():
     chain = Blockchain(ASSETS, {"v1": 40, "v2": 30, "v3": 30})
     from hl.spot import SpotStore
     from hl.staking import Staking
-    from hl.vaults import HlpVault
+    from hl.vaults import HlpVault, VaultFactory
     spot = SpotStore()
     staking = Staking()
     vault = HlpVault()
+    vfactory = VaultFactory()
+    vfactory.create("public_vault_leader", "alpha", usd=100_000 * S,
+                    ts=0, marks={"BTC": 82_000 * S})
     staking.register("v1", 40_000 * S, 3)
     staking.register("v2", 30_000 * S, 5)
     staking.register("v3", 30_000 * S, 5)
     api = ApiState(chain.sim.nodes[chain.sim._leader()].engine, spot=spot,
-                   staking=staking, vault=vault)
+                   staking=staking, vault=vault, vault_factory=vfactory)
     e = api.engine
     e.set_oracle("BTC", 82_000 * S)
 

@@ -97,3 +97,26 @@ class HlpVault:
             cur[1] = qdiv(cur[1] * abs(cur[0]) + entry_px * abs(szi), tot)
             cur[0] += szi
             self.positions[coin] = cur
+
+
+class VaultFactory:
+    """Legacy HyperCore vault model (specs/15): anyone creates a vault and
+    becomes its leader; depositors share PnL via the same share accounting
+    as HLP. Leaders trade vault capital through their vault account."""
+
+    def __init__(self):
+        self.vaults = {}   # name -> HlpVault
+        self.leaders = {}  # name -> leader user
+
+    def create(self, leader, name, usd=0, ts=0, marks=None):
+        if name in self.vaults or not name or len(name) > 20:
+            return False, "bad_name"
+        v = HlpVault(name)
+        self.vaults[name] = v
+        self.leaders[name] = leader
+        if usd > 0:
+            v.deposit(leader, usd, ts, marks or {})
+        return True, name
+
+    def get(self, name):
+        return self.vaults.get(name)

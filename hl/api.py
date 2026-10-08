@@ -12,6 +12,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .num import qdiv
 from .config import SCALE
 
+
+def _ws_frame_bytes(op, payload):
+    data = payload if isinstance(payload, bytes) else payload.encode()
+    ln = len(data)
+    if ln < 126:
+        return bytes([op, ln]) + data
+    if ln < 65536:
+        return bytes([op, 126]) + ln.to_bytes(2, "big") + data
+    return bytes([op, 127]) + ln.to_bytes(8, "big") + data
+
 MAX_NONCES = 10_000
 
 
@@ -33,11 +43,13 @@ def fmt_px(px):
 class ApiState:
     """Server state around one Engine. All /info reads + /exchange writes."""
 
-    def __init__(self, engine, spot=None, staking=None, vault=None):
+    def __init__(self, engine, spot=None, staking=None, vault=None,
+                 vault_factory=None):
         self.engine = engine
         self.spot = spot
         self.staking = staking
         self.vault = vault
+        self.vault_factory = vault_factory
         self.referrals_ui = {}   # user -> {code, referred: [], earned}
         self.lock = threading.RLock()
         self.used_nonces = set()
@@ -134,6 +146,24 @@ class ApiState:
                     "totalShares": fmt_px(v.total_shares),
                     "yourShares": fmt_px(v.shares.get(u, 0)),
                     "lockedUntil": v.last_deposit_ts.get(u, 0) + 4 * 86400}
+        if t == "vaults":
+            out = []
+            vf = self.vault_factory
+            marks = {c: self.engine.mark(c) for c in self.engine.assets}
+            if self.vault is not None:
+                out.append({"name": self.vault.name, "leader": "HLP",
+                            "equity": fmt_px(self.vault.equity(marks)),
+                            "sharePx": fmt_px(self.vault.share_px(marks)),
+                            "leaderFraction": "0%"})
+            if vf is not None:
+                for name in sorted(vf.vaults):
+                    v = vf.vaults[name]
+                    eq = v.equity(marks)
+                    shp = v.share_px(marks)
+                    out.append({"name": name, "leader": vf.leaders[name],
+                                "equity": fmt_px(eq), "sharePx": fmt_px(shp),
+                                "leaderFraction": "0%"})
+            return out
         if t == "referral":
             u = req.get("user")
             r = self.engine
@@ -360,6 +390,45 @@ class ApiState:
                                        int(action["amount"]))
             return {"status": "ok" if ok else "err",
                     "response": "delegated" if ok else "no_validator"}
+        if t == "createVault":
+            vf = self.vault_factory
+            if vf is None:
+                return {"status": "err", "response": "no_factory"}
+            amt = int(action.get("usd", 0))
+            ok, why = vf.create(user, action["name"], usd=min(amt,
+                                self.engine.ch.acc(user).usd),
+                                ts=int(time.time()),
+                                marks={c: self.engine.mark(c)
+                                       for c in self.engine.assets})
+            if ok and amt > 0:
+                self.engine.ch.acc(user).usd -= min(amt,
+                                                    self.engine.ch.acc(user).usd)
+            return {"status": "ok" if ok else "err", "response": why}
+        if t == "vaultDepositNamed":
+            vf = self.vault_factory
+            v = vf.get(action["name"]) if vf else None
+            if v is None:
+                return {"status": "err", "response": "no_vault"}
+            marks = {c: self.engine.mark(c) for c in self.engine.assets}
+            amt = int(action["amount"])
+            if self.engine.ch.acc(user).usd < amt:
+                return {"status": "err", "response": "insufficient"}
+            self.engine.ch.acc(user).usd -= amt
+            v.deposit(user, amt, int(time.time()), marks)
+            return {"status": "ok", "response": "deposited"}
+        if t == "vaultWithdrawNamed":
+            vf = self.vault_factory
+            v = vf.get(action["name"]) if vf else None
+            if v is None:
+                return {"status": "err", "response": "no_vault"}
+            marks = {c: self.engine.mark(c) for c in self.engine.assets}
+            got = v.withdraw(user, int(action.get("num", 1)),
+                             int(action.get("den", 1)),
+                             int(time.time()), marks)
+            if got is None:
+                return {"status": "err", "response": "locked_or_empty"}
+            self.engine.ch.acc(user).usd += got
+            return {"status": "ok", "response": fmt_px(got)}
         if t == "vaultDeposit" and self.vault is not None:
             marks = {c: self.engine.mark(c) for c in self.engine.assets}
             amt = int(action["amount"])
@@ -454,13 +523,14 @@ def make_server(api_state, chain=None, host="127.0.0.1", port=0):
             self.wfile.write(body)
 
         def _ws_upgrade(self):
-            """specs/14: RFC6455 server push of {book, mid, trades}.
-            Server frames are unmasked; one text frame per tick."""
+            """specs/15: the real typed subscription protocol.
+            Client: {"method":"subscribe","subscription":{...}} (masked frames).
+            Server pushes per-sub payloads (unmasked) every tick."""
+            import base64 as b64
+            import hashlib
             key = self.headers.get("Sec-WebSocket-Key")
             if not key:
                 return self._json(400, {"error": "no_ws_key"})
-            import base64 as b64
-            import hashlib
             accept = b64.b64encode(
                 hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
                              .encode()).digest()).decode()
@@ -469,35 +539,122 @@ def make_server(api_state, chain=None, host="127.0.0.1", port=0):
             self.send_header("Connection", "Upgrade")
             self.send_header("Sec-WebSocket-Accept", accept)
             self.end_headers()
-            try:
-                coin = "BTC"
-                while True:
-                    with api_state.lock:
-                        b = api_state.engine.books.get(coin)
-                        bb = b.best_bid() if b else None
-                        ba = b.best_ask() if b else None
 
-                        def lvls(side, rev):
-                            out = []
-                            for px in sorted(side, reverse=rev)[:12]:
-                                tot = sum(o.sz_rem for o in side[px])
-                                out.append([px / 1e8,
-                                            tot / 1e8, len(side[px])])
-                            return out
-                        payload = {
-                            "t": int(time.time() * 1000),
-                            "bids": lvls(b.bids, True) if b else [],
-                            "asks": lvls(b.asks, False) if b else [],
-                            "mid": (bb + ba) / 2e8 if bb and ba else None,
-                            "trades": [{"px": ev["px"] / 1e8,
-                                        "sz": ev["sz"] / 1e8,
-                                        "buy": ev["is_buy"]}
-                                       for ev in api_state.events[-40:]
-                                       if ev.get("t") == "fill"],
-                        }
-                    frame = _ws_frame(json.dumps(payload, separators=(",", ":")))
-                    self.wfile.write(frame)
-                    self.wfile.flush()
+            class Frame:
+                pass
+
+            def read_client_frame():
+                hdr = b""
+                while len(hdr) < 2:
+                    c = self.rfile.read(2 - len(hdr))
+                    if not c:
+                        raise ConnectionError("closed")
+                    hdr += c
+                op = hdr[0] & 0x0F
+                masked = hdr[1] & 0x80
+                ln = hdr[1] & 0x7F
+                if ln == 126:
+                    ext = self.rfile.read(2)
+                    ln = int.from_bytes(ext, "big")
+                elif ln == 127:
+                    ext = self.rfile.read(8)
+                    ln = int.from_bytes(ext, "big")
+                mask = self.rfile.read(4) if masked else None
+                payload = self.rfile.read(ln) if ln else b""
+                if mask:
+                    payload = bytes(b ^ mask[i % 4]
+                                    for i, b in enumerate(payload))
+                return op, payload
+
+            subs = []
+
+            def snapshot(sub):
+                e = api_state.engine
+                st = sub["type"]
+                if st == "allMids":
+                    out = {}
+                    for coin in sorted(e.assets):
+                        b2 = e.books[coin]
+                        px = b2.mid() or b2.last_trade or e.mark(coin)
+                        if px is not None:
+                            out[coin] = fmt_px(px)
+                    return {"channel": "allMids", "data": out}
+                if st == "l2Book":
+                    b2 = e.books.get(sub.get("coin", "BTC"))
+                    if b2 is None:
+                        return None
+                    lvls = [
+                        [[fmt_px(px), str(sum(o.sz_rem for o in b2.bids[px])
+                                          / 1e8), len(b2.bids[px])]
+                          for px in sorted(b2.bids, reverse=True)[:20]],
+                        [[fmt_px(px), str(sum(o.sz_rem for o in b2.asks[px])
+                                          / 1e8), len(b2.asks[px])]
+                          for px in sorted(b2.asks)[:20]]]
+                    return {"channel": "l2Book", "coin": sub.get("coin"),
+                            "data": {"coin": sub.get("coin"),
+                                     "time": int(time.time() * 1000),
+                                     "levels": lvls}}
+                if st == "trades":
+                    t = [{"coin": ev["coin"], "px": fmt_px(ev["px"]),
+                          "sz": str(ev["sz"] / 1e8), "side": "B" if ev["is_buy"] else "A",
+                          "time": ev["ts"]}
+                         for ev in api_state.events[-30:] if ev.get("t") == "fill"]
+                    return {"channel": "trades", "data": t}
+                if st == "candle":
+                    t = [{"coin": ev["coin"], "px": ev["px"], "sz": ev["sz"],
+                          "ts": ev["ts"]} for ev in api_state.events[-60:]
+                         if ev.get("t") == "fill" and ev["coin"] == sub.get("coin")]
+                    out = {}
+                    for x in t:
+                        m = x["ts"] // 60000 * 60000
+                        c = out.setdefault(m, [x["px"], x["px"], x["px"], x["px"]])
+                        c[1] = max(c[1], x["px"]); c[2] = min(c[2], x["px"])
+                        c[3] = x["px"]
+                    return {"channel": "candle", "data": [
+                        {"t": m, "o": c[0], "h": c[1], "l": c[2], "c": c[3]}
+                        for m, c in sorted(out.items())]}
+                if st in ("userEvents", "orderUpdates", "userFills"):
+                    u = sub.get("user")
+                    evs = [dict(ev) for ev in api_state.events
+                           if ev.get("t") == "fill"
+                           and (ev.get("taker") == u or ev.get("maker") == u)]
+                    return {"channel": st, "data": evs[-20:]}
+                if st == "clearinghouseState":
+                    s = api_state.info({"type": "userState",
+                                        "user": sub.get("user")})
+                    return {"channel": "clearinghouseState", "data": s}
+                return None
+
+            try:
+                while True:
+                    op, payload = read_client_frame()
+                    if op == 8:
+                        return
+                    if op == 9:  # ping -> pong
+                        self.wfile.write(_ws_frame_bytes(0x8A, payload))
+                        continue
+                    if op != 1:
+                        continue
+                    try:
+                        msg = json.loads(payload)
+                    except Exception:
+                        continue
+                    method = msg.get("method")
+                    sub = msg.get("subscription", {})
+                    if method == "subscribe":
+                        subs.append(sub)
+                        self.wfile.write(_ws_frame_bytes(
+                            0x81, json.dumps({"channel": "subscriptionResult",
+                                              "sub": sub})))
+                    elif method == "unsubscribe":
+                        subs = [s for s in subs
+                                if s.get("type") != sub.get("type")]
+                    with api_state.lock:
+                        for sub in subs:
+                            snap = snapshot(sub)
+                            if snap is not None:
+                                self.wfile.write(_ws_frame_bytes(
+                                    0x81, json.dumps(snap, separators=(",", ":"))))
                     time.sleep(0.3)
             except Exception:
                 return

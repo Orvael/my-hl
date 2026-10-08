@@ -143,8 +143,16 @@ canvas{width:100%;display:block}
   </div>
 </div>
 
-<div class="page" id="p-vaults"><div class="panel" style="max-width:520px">
-  <h4>HLP Vault — liquidity + backstop</h4>
+<div class="page" id="p-vaults">
+  <div class="panel" style="max-width:640px;margin-bottom:10px">
+    <h4>All vaults</h4><table id="v_list"></table>
+    <h4 style="margin-top:10px">Create your vault (become its leader)</h4>
+    <input id="v_name" placeholder="vault name">
+    <input id="v_seed" type="number" placeholder="initial USDC">
+    <button class="btn" onclick="vcreate()">Create vault</button>
+  </div>
+  <div class="panel" style="max-width:520px">
+    <h4>HLP Vault — liquidity + backstop</h4>
   <div class="kv"><span>Vault equity</span><b id="v_eq">—</b></div>
   <div class="kv"><span>Share price</span><b id="v_sp">—</b></div>
   <div class="kv"><span>Your shares</span><b id="v_me">—</b></div>
@@ -433,6 +441,18 @@ function refreshSpot(){
       '<div class="kv"><span>'+k+'</span><b>'+b[k].toLocaleString(undefined,
       {maximumFractionDigits:2})+'</b></div>').join('') : '<div class="note">empty — use the faucet</div>';});
 }
+function vlist(){
+  api('/info',{type:'vaults'},vs=>{
+    var t='<tr><th>vault</th><th>leader</th><th>equity</th><th>share px</th></tr>';
+    (vs||[]).forEach(v=>{t+='<tr><td>'+v.name+'</td><td>'+v.leader+'</td><td class="b">$'+
+      v.equity+'</td><td>'+v.sharePx+'</td></tr>';});
+    $('v_list').innerHTML=t+'</table>';});
+}
+function vcreate(){ requireAuth(()=>{
+  var amt = Math.round(parseFloat($('v_seed').value||'0')*1e8);
+  api('/exchange',{action:{type:'createVault',name:$('v_name').value,usd:amt},
+    nonce:Date.now(),signature:{signer:ME}},r=>{toast(r.status==='ok'?'vault created: '+r.response:r.response);
+    refresh();});});}
 function vdep(){ requireAuth(()=>{
   var amt = Math.round(parseFloat($('v_amt').value||'0')*1e8);
   api('/exchange',{action:{type:'vaultDeposit',amount:amt},nonce:Date.now(),
@@ -453,7 +473,7 @@ function setref(){ requireAuth(()=>{
 function refreshPage(){
   var p = document.querySelector('.page.on').id;
   if (p==='p-spot') refreshSpot();
-  if (p==='p-vaults') api('/info',{type:'vault',user:ME},v=>{ if(!v) return;
+  if (p==='p-vaults'){ vlist(); api('/info',{type:'vault',user:ME},v=>{ if(!v) return;
     $('v_eq').textContent='$'+parseFloat(v.equity).toLocaleString(undefined,{maximumFractionDigits:0});
     $('v_sp').textContent=v.sharePx; $('v_me').textContent=v.yourShares;});
   if (p==='p-board') api('/info',{type:'leaderboard'},rows=>{

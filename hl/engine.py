@@ -36,6 +36,7 @@ class Engine:
         self.referral_rewards = {}  # referrer -> usd accrued
         self.points = {}          # user -> points (airdrop distribution)
         self.delisted = set()
+        self.hyperp_oracle = {}   # specs/15: EWMA oracle for hyperp assets
 
     def mark(self, coin):
         """specs/06 robust mark; falls back to oracle if never computed."""
@@ -45,9 +46,22 @@ class Engine:
         return self.oracles.get(coin)
 
     def update_marks(self):
-        """specs/06: refresh robust marks from book + externals (end of block)."""
+        """specs/15 hyperps: assets with hyperp=true get their oracle from an
+        EWMA of their own marks (no external underlying); funding premium
+        samples are scaled by 1% per the docs."""
         for coin in sorted(self.assets):
             oracle = self.oracles.get(coin)
+            if self.assets[coin].get("hyperp"):
+                b = self.books[coin]
+                m = self.mark_engine.update(
+                    coin, oracle, b.mid(), b.best_bid(), b.best_ask(),
+                    b.last_trade, None, self.block_ts)
+                if m is not None:
+                    self.marks[coin] = m
+                    prev = self.hyperp_oracle.get(coin, m)
+                    self.hyperp_oracle[coin] = prev + (m - prev) // 480
+                    self.oracles[coin] = self.hyperp_oracle[coin]
+                continue
             if oracle is None:
                 continue
             b = self.books[coin]
