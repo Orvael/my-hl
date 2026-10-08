@@ -23,14 +23,16 @@ class Order:
 
 
 class Position:
-    __slots__ = ("coin", "szi", "entry_px", "iso_margin", "is_isolated")
+    __slots__ = ("coin", "szi", "entry_px", "iso_margin", "is_isolated", "lev")
 
-    def __init__(self, coin, szi=0, entry_px=0, iso_margin=0, is_isolated=False):
+    def __init__(self, coin, szi=0, entry_px=0, iso_margin=0, is_isolated=False,
+                 lev=None):
         self.coin = coin
         self.szi = szi
         self.entry_px = entry_px
         self.iso_margin = iso_margin
         self.is_isolated = is_isolated
+        self.lev = lev
 
 
 class Account:

@@ -24,6 +24,8 @@ class Engine:
         self.mark_engine = MarkEngine()
         self.marks = {}
         self.trig = TriggerStore()
+        self.partial_liq_threshold = 100_000 * SCALE
+        self.last_partial_ts = {}
 
     def mark(self, coin):
         """specs/06 robust mark; falls back to oracle if never computed."""
@@ -70,6 +72,22 @@ class Engine:
             if f["maker_oid"] not in self.books[coin].orders:
                 self.trig.promote_children(f["maker_oid"])
 
+    def order_value_cap(self, coin, tif):
+        """specs/07 caps: $30M max_lev>=25; $5M [20,25); $2M [10,20); else $500k.
+        Limit orders (GTC/ALO) get 10x the market cap."""
+        mx = self.assets[coin]["max_leverage"]
+        if mx >= 25:
+            cap = 30_000_000 * SCALE
+        elif mx >= 20:
+            cap = 5_000_000 * SCALE
+        elif mx >= 10:
+            cap = 2_000_000 * SCALE
+        else:
+            cap = 500_000 * SCALE
+        if tif in ("GTC", "ALO"):
+            cap *= 10
+        return cap
+
     def px_valid(self, coin, px):
         """specs/05: <=5 sig figs AND <= (6 - szDecimals) decimals; integers always OK."""
         cfg = self.assets[coin]
@@ -98,6 +116,9 @@ class Engine:
             return None, "bad_px"
         if not self.sz_valid(coin, sz):
             return None, "bad_sz"
+        ntl_cap = self.order_value_cap(coin, tif)
+        if notional(px, sz) > ntl_cap:
+            return None, "too_large"
         marks = dict(self.oracles)
         if reduce_only:
             pos = self.ch.acc(user).positions.get(coin)
@@ -300,6 +321,26 @@ class Engine:
             acc = self.ch.acc(user)
             if not acc.positions:
                 continue
+            # isolated positions: own bucket, own notional (specs/07)
+            for coin in sorted(acc.positions):
+                pos = acc.positions[coin]
+                if not pos.is_isolated or pos.szi == 0:
+                    continue
+                m = marks_live.get(coin)
+                if m is None:
+                    continue
+                ntl = notional(m, abs(pos.szi))
+                eq_iso = self.ch.iso_equity(acc, coin, marks_live)
+                mreq_iso = self.ch.maintenance_req_pos(coin, ntl)
+                if eq_iso is None or eq_iso >= mreq_iso:
+                    continue
+                if eq_iso < qdiv(2 * mreq_iso, 3):
+                    self.ch.iso_backstop(user, coin)
+                    events.append({"t": "backstop_iso", "user": user, "coin": coin})
+                    continue
+                is_buy = pos.szi < 0
+                px_bound = SCALE * SCALE if is_buy else 1
+                self.execute_market(user, coin, is_buy, abs(pos.szi), px_bound, "IOC")
             for _ in range(50):
                 eq = self.ch.account_value(acc, marks_live)
                 mreq = self.ch.maintenance_req(acc, marks_live)
@@ -317,6 +358,11 @@ class Engine:
                     continue
                 is_buy = pos.szi < 0
                 sz = abs(pos.szi)
+                ntl = notional(marks_live.get(coin, 0), sz)
+                in_cooldown = self.block_ts - self.last_partial_ts.get(user, 0) <= 30
+                if ntl > self.partial_liq_threshold and not in_cooldown:
+                    sz = qdiv(sz, 5)
+                    self.last_partial_ts[user] = self.block_ts
                 px_bound = SCALE * SCALE if is_buy else 1
                 status, fills = self.execute_market(user, coin, is_buy, sz,
                                                     px_bound, "IOC")

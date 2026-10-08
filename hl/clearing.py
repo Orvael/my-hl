@@ -51,6 +51,10 @@ class ClearingHouse:
             close_sz = min(-szi0 if szi0 < 0 else szi0, sz)
             realized = qdiv(side0 * (px - pos.entry_px) * close_sz, SCALE)
             acc.usd += realized
+            if pos.is_isolated:
+                ret = qdiv(pos.iso_margin * close_sz, -szi0 if szi0 < 0 else szi0)
+                acc.usd += ret
+                pos.iso_margin -= ret
             if sz > close_sz:
                 pos.szi = inc + side0 * close_sz
                 pos.entry_px = px
@@ -60,21 +64,6 @@ class ClearingHouse:
             del acc.positions[coin]
         acc.usd -= fee
         return realized
-
-    def upnl(self, acc, marks):
-        total = 0
-        for coin, pos in acc.positions.items():
-            if pos.szi == 0:
-                continue
-            m = marks.get(coin)
-            if m is None:
-                continue
-            side = 1 if pos.szi > 0 else -1
-            total += qdiv(side * (m - pos.entry_px) * abs(pos.szi), SCALE)
-        return total
-
-    def account_value(self, acc, marks):
-        return acc.usd + self.upnl(acc, marks)
 
     def total_notional(self, acc, marks):
         tot = 0
@@ -99,6 +88,41 @@ class ClearingHouse:
             tot += qdiv(notional(m, abs(pos.szi)), lev)
         return tot
 
+    def tier_max_lev(self, coin, ntl):
+        """specs/07: tier by notional position value; single-tier fallback."""
+        cfg = self.assets[coin]
+        tiers = cfg.get("margin_tiers")
+        if not tiers:
+            return cfg["max_leverage"]
+        mx = tiers[0]["max_lev"]
+        for t in tiers:
+            if ntl >= t["lower_usd"]:
+                mx = t["max_lev"]
+            else:
+                break
+        return mx
+
+    def maintenance_req_pos(self, coin, ntl):
+        """specs/07: mm = sum over tier segments of covered_notional * rate_i.
+        Equal by construction to notional*rate(top) - deduction recursion."""
+        cfg = self.assets[coin]
+        tiers = cfg.get("margin_tiers")
+        if not tiers:
+            rate = qdiv(SCALE, 2 * cfg["max_leverage"])
+            return qdiv(ntl * rate, SCALE)
+        tot = 0
+        for i, t in enumerate(tiers):
+            lower = t["lower_usd"]
+            upper = tiers[i + 1]["lower_usd"] if i + 1 < len(tiers) else None
+            covered = ntl - lower
+            if upper is not None:
+                covered = min(covered, upper - lower)
+            if covered <= 0:
+                break
+            rate = qdiv(SCALE, 2 * t["max_lev"])
+            tot += qdiv(covered * rate, SCALE)
+        return tot
+
     def maintenance_req(self, acc, marks):
         tot = 0
         for coin, pos in acc.positions.items():
@@ -107,10 +131,39 @@ class ClearingHouse:
             m = marks.get(coin)
             if m is None:
                 continue
-            lev = self.assets[coin]["max_leverage"]
-            rate = qdiv(SCALE, 2 * lev)
-            tot += qdiv(notional(m, abs(pos.szi)) * rate, SCALE)
+            ntl = notional(m, abs(pos.szi))
+            if pos.is_isolated:
+                continue  # isolated liq is checked per position, not cross
+            tot += self.maintenance_req_pos(coin, ntl)
         return tot
+
+    def upnl_cross(self, acc, marks):
+        total = 0
+        for coin, pos in acc.positions.items():
+            if pos.szi == 0 or pos.is_isolated:
+                continue
+            m = marks.get(coin)
+            if m is None:
+                continue
+            side = 1 if pos.szi > 0 else -1
+            total += qdiv(side * (m - pos.entry_px) * abs(pos.szi), SCALE)
+        return total
+
+    def account_value(self, acc, marks):
+        """Cross account value: balance + cross-only pnl (isolated excluded)."""
+        return acc.usd + self.upnl_cross(acc, marks)
+
+    def iso_equity(self, acc, coin, marks):
+        """specs/07: isolated liq inputs = iso bucket + that position's pnl only."""
+        pos = acc.positions.get(coin)
+        if pos is None or not pos.is_isolated:
+            return None
+        m = marks.get(coin)
+        if m is None:
+            return None
+        side = 1 if pos.szi > 0 else -1
+        pnl = qdiv(side * (m - pos.entry_px) * abs(pos.szi), SCALE)
+        return pos.iso_margin + pnl
 
     def can_open(self, user, coin, px, sz, marks):
         acc = self.acc(user)
@@ -149,7 +202,6 @@ class ClearingHouse:
         for user in sorted(self.accounts):
             if user.startswith("vault_"):
                 continue
-                continue
             acc = self.acc(user)
             delta = self.funding_pay(acc, coin, F8, oracle_px)
             acc.usd += delta
@@ -174,6 +226,37 @@ class ClearingHouse:
                 vp.szi += pos.szi
         a.usd = 0
         a.positions = {}
+
+    def iso_backstop(self, user, coin):
+        """specs/07: isolated backstop = that position + its bucket to vault."""
+        a = self.acc(user)
+        pos = a.positions.get(coin)
+        if pos is None:
+            return
+        v = self.acc(VAULT_HLP)
+        v.usd += pos.iso_margin
+        vp = v.positions.get(coin)
+        if vp is None or vp.szi == 0:
+            v.positions[coin] = Position(coin, pos.szi, pos.entry_px)
+        else:
+            vp.entry_px = wavg(vp.entry_px, abs(vp.szi),
+                               pos.entry_px, abs(pos.szi))
+            vp.szi += pos.szi
+        del a.positions[coin]
+
+    def open_isolated(self, user, coin, amt):
+        """Move amt from cross balance into the position's isolated bucket."""
+        a = self.acc(user)
+        pos = a.positions.get(coin)
+        if pos is None:
+            return False
+        amt = min(amt, a.usd)
+        if amt <= 0:
+            return False
+        pos.is_isolated = True
+        pos.iso_margin += amt
+        a.usd -= amt
+        return True
 
     def adl_rank(self, acc, coin, mark):
         """specs/05 ADL index: (mark/entry) * (notional/account_value)."""
