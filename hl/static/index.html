@@ -468,11 +468,12 @@ function backfill(){
     });
     candles = Object.keys(map).map(k=>map[k])
       .sort((a,b)=>a.time-b.time).slice(-400);
+    lastTradeTs = candles.length ? candles[candles.length-1].time : 0;
     if (series && candles.length) series.setData(candles);
     saveC();
   });
 }
-var COIN='BTC', WS=null, prevPx=null, BOOK={bids:[],asks:[]};
+var COIN='BTC', WS=null, prevPx=null, lastTradeTs=0, BOOK={bids:[],asks:[]};
 function ws(){
   WS = new WebSocket((location.protocol==='https:'?'wss://':'ws://')+
     location.host+'/ws');
@@ -494,7 +495,11 @@ function ws(){
       var lv = d.data.levels; drawBook(lv[0], lv[1]); drawDepth();
     } else if (d.channel==='trades'){
       tape(d.data);
-      (d.data||[]).forEach(t=>pushCandle(t.time*1000, parseFloat(t.px)));
+      (d.data||[]).forEach(t=>{
+        var tms=t.time*1000;
+        if (tms>=lastTradeTs){ lastTradeTs=tms;
+          pushCandle(tms, parseFloat(t.px)); }
+      });
       saveC();
     }
   };
