@@ -1,176 +1,256 @@
 <!DOCTYPE html>
-<!-- Created: WIB 2026-10-08 18:33 -->
 <html>
 <head>
 <meta charset="utf-8">
-<title>my-hl — Hyperliquid imitation</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>my-hl · testnet</title>
 <style>
-  :root { --bg:#0b0e11; --panel:#14181d; --line:#1f262e; --green:#1db954;
-          --red:#f6465d; --text:#eaecef; --dim:#848e9c; }
-  * { box-sizing:border-box; margin:0; font-family:ui-monospace,Menlo,monospace; }
-  body { background:var(--bg); color:var(--text); padding:14px; }
-  h1 { font-size:15px; color:var(--dim); margin-bottom:10px; }
-  .grid { display:grid; grid-template-columns:280px 1fr 300px; gap:12px; }
-  .panel { background:var(--panel); border:1px solid var(--line);
-           border-radius:8px; padding:10px; }
-  .panel h2 { font-size:11px; color:var(--dim); text-transform:uppercase;
-              letter-spacing:.08em; margin-bottom:8px; }
-  .row { display:flex; justify-content:space-between; padding:2px 4px;
-         font-size:12px; }
-  .bid { color:var(--green); } .ask { color:var(--red); }
-  input,select { background:var(--bg); border:1px solid var(--line);
-                 color:var(--text); border-radius:6px; padding:6px;
-                 width:100%; font-size:12px; margin-bottom:6px; }
-  button { width:100%; padding:8px; border:0; border-radius:6px; cursor:pointer;
-           font-weight:bold; color:#fff; font-size:12px; }
-  .buy { background:var(--green); } .sell { background:var(--red); }
-  table { width:100%; font-size:12px; border-collapse:collapse; }
-  th,td { text-align:right; padding:3px 6px; border-bottom:1px solid var(--line); }
-  th { color:var(--dim); font-weight:normal; font-size:10px; }
-  #mids { font-size:18px; padding:4px 2px; }
-  .flash { animation:f .5s; } @keyframes f { from{background:#2a3f00} }
+:root { --bg:#0a0c10; --p1:#12161c; --p2:#181e26; --line:#232b36;
+        --up:#0ecb81; --dn:#f6465d; --txt:#eaecef; --dim:#707a8a; }
+*{box-sizing:border-box;margin:0;font-family:'SF Mono',ui-monospace,Menlo,monospace}
+body{background:var(--bg);color:var(--txt);font-size:13px}
+.top{display:flex;align-items:center;gap:18px;padding:10px 16px;
+     border-bottom:1px solid var(--line);background:var(--p1);position:sticky;top:0;z-index:5}
+.top .pair{font-size:15px;font-weight:bold}
+.top .px{font-size:20px;font-weight:bold}
+.top .chg{font-size:12px;padding:2px 6px;border-radius:4px}
+.top .stat{color:var(--dim);font-size:11px}
+.top .stat b{color:var(--txt)}
+.grid{display:grid;grid-template-columns:240px 1fr 260px;gap:1px;
+      background:var(--line);min-height:calc(100vh - 55px)}
+.panel{background:var(--bg);padding:10px;overflow:hidden}
+h3{font-size:10px;color:var(--dim);text-transform:uppercase;
+   letter-spacing:.08em;margin-bottom:6px}
+.row{display:flex;justify-content:space-between;padding:1px 4px;
+     position:relative;font-size:12px}
+.row .bar{position:absolute;right:0;top:1px;bottom:1px;opacity:.12;border-radius:2px}
+.row .bar.b{background:var(--up)} .row .bar.a{background:var(--dn)}
+.b{color:var(--up)} .a{color:var(--dn)}
+.mid{font-size:17px;font-weight:bold;text-align:center;padding:6px 0}
+input,select{background:var(--p2);border:1px solid var(--line);color:var(--txt);
+             border-radius:6px;padding:7px;width:100%;font-size:12px;margin-bottom:6px}
+button{border:0;border-radius:6px;cursor:pointer;color:#fff;font-weight:bold;padding:8px;font-size:12px}
+.buy{background:var(--up);color:#04140b}.sell{background:var(--dn)}
+.qs{display:flex;gap:4px;margin-bottom:6px}
+.qs button{flex:1;background:var(--p2);color:var(--dim);padding:4px;font-size:10px}
+.tabs{display:flex;gap:1px;margin-bottom:8px}
+.tabs div{flex:1;text-align:center;padding:6px;background:var(--p2);
+          color:var(--dim);cursor:pointer;font-size:11px;border-radius:4px}
+.tabs div.on{background:var(--p1);color:var(--txt)}
+table{width:100%;font-size:12px;border-collapse:collapse}
+th,td{text-align:right;padding:3px 6px;border-bottom:1px solid var(--line)}
+th{color:var(--dim);font-weight:normal;font-size:10px}
+#toast{position:fixed;bottom:16px;right:16px;background:var(--p2);
+       border:1px solid var(--line);border-radius:8px;padding:10px 14px;
+       font-size:12px;display:none;z-index:9}
+canvas{width:100%;display:block}
 </style>
 </head>
 <body>
-<h1>my-hl · deterministic Hyperliquid imitation · <span id="chain">chain</span></h1>
+<div class="top">
+  <span class="pair">BTC-USD</span>
+  <span class="px" id="px">—</span>
+  <span class="chg" id="chg">—</span>
+  <span class="stat">24h High <b id="hi">—</b></span>
+  <span class="stat">Low <b id="lo">—</b></span>
+  <span class="stat">Block <b id="blk">—</b></span>
+  <span class="stat" style="margin-left:auto">account
+    <input id="user" value="trader1" style="width:90px;margin:0">
+    <b id="av" style="color:var(--up)">$—</b>
+    <button onclick="faucet()" style="background:#2a6f97;padding:5px 8px">FAUCET</button>
+  </span>
+</div>
 <div class="grid">
-  <div>
-    <div class="panel">
-      <h2>Order book · <span id="coin">BTC</span></h2>
-      <div id="asks"></div>
-      <div id="mids">—</div>
-      <div id="bids"></div>
-    </div>
-    <div class="panel" style="margin-top:12px">
-      <h2>Place order</h2>
-      <select id="side"><option value="true">BUY</option>
-        <option value="false">SELL</option></select>
-      <input id="px" placeholder="price (usd)">
-      <input id="sz" placeholder="size (units)">
-      <select id="tif"><option>GTC</option><option>IOC</option>
-        <option>ALO</option></select>
-      <button class="buy" onclick="send(true)">BUY</button>
-      <button class="sell" onclick="send(false)">SELL</button>
-      <div id="msg" style="font-size:11px;color:var(--dim);margin-top:6px"></div>
-    </div>
+  <div class="panel">
+    <h3>Order book</h3>
+    <div id="asks"></div>
+    <div class="mid" id="mid">—</div>
+    <div id="bids"></div>
+  </div>
+  <div class="panel">
+    <h3>BTC-USDC · 1m</h3>
+    <canvas id="chart" width="900" height="360"></canvas>
+    <h3 style="margin-top:10px">Recent trades</h3>
+    <table id="tape"></table>
   </div>
   <div>
     <div class="panel">
-      <h2>Positions</h2>
-      <table id="pos"><tr><th>coin</th><th>size</th><th>entry</th>
-        <th>mark</th><th>uPnL</th></tr></table>
-      <h2 style="margin-top:12px">Recent fills</h2>
-      <table id="fills"></table>
+      <h3>Order</h3>
+      <div class="qs">
+        <button onclick="setpx(0.995)">-0.5%</button>
+        <button onclick="setpx(1)">MID</button>
+        <button onclick="setpx(1.005)">+0.5%</button>
+      </div>
+      <input id="px_in" placeholder="price USDC" type="number">
+      <input id="sz_in" placeholder="size BTC" type="number" step="0.01">
+      <select id="tif"><option>GTC</option><option>IOC</option><option>ALO</option></select>
+      <div style="display:flex;gap:6px">
+        <button class="buy" onclick="send(true)">BUY</button>
+        <button class="sell" onclick="send(false)">SELL</button>
+      </div>
+      <div id="msg"></div>
+    </div>
+    <div class="panel" style="margin-top:1px">
+      <div class="tabs">
+        <div class="on" onclick="tab(this,'pos')">POSITIONS</div>
+        <div onclick="tab(this,'oo')">ORDERS</div>
+        <div onclick="tab(this,'hist')">HISTORY</div>
+      </div>
+      <div id="pos"></div>
+      <div id="oo" style="display:none"></div>
+      <div id="hist" style="display:none"></div>
     </div>
   </div>
-  <div>
-    <div class="panel">
-      <h2>Account</h2>
-      <input id="user" value="trader1" placeholder="your account name">
-      <div class="row"><span>account value</span><b id="av">—</b></div>
-      <div class="row"><span>withdrawable</span><b id="wd">—</b></div>
-      <button style="background:#2a6f97;margin-top:8px"
-              onclick="faucet()">GET 10,000 TEST USDC</button>
-    </div>
-    <div class="panel" style="margin-top:12px">
-      <h2>Open orders</h2>
-      <table id="oo"></table>
-    </div>
-    <div class="panel" style="margin-top:12px">
-      <h2>Chain</h2>
-      <div class="row"><span>height</span><b id="h">—</b></div>
-      <div class="row"><span>state hash</span><span id="sh" style="font-size:9px">—</span></div>
-    </div>
-  </div>
+  <div id="toast"></div>
 </div>
 <script>
-var since = 0;
-function api(path, body, cb) {
-  fetch(path, body ? {method:'POST', headers:{'Content-Type':'application/json'},
-                      body:JSON.stringify(body)} : {})
-    .then(r => r.json()).then(cb);
+var WS_OK = false, since = 0, lastMid = null, sessionStart = null, candles = [], CUR = 'pos';
+var userEl = document.getElementById('user');
+function $(id){return document.getElementById(id)}
+function toast(m){var t=$('toast');t.textContent=m;t.style.display='block';
+  clearTimeout(t._h);t._h=setTimeout(()=>t.style.display='none',2600)}
+function api(p,b,cb){fetch(p,b?{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify(b)}:{}).then(r=>r.json()).then(cb).catch(()=>{})}
+userEl.onchange = refresh;
+
+// --- websocket stream ---
+function ws() {
+  var s = new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
+  s.onopen = () => WS_OK = true;
+  s.onclose = () => { WS_OK = false; setTimeout(ws, 1500); };
+  s.onmessage = ev => {
+    var d = JSON.parse(ev.data);
+    if (d.mid) { lastMid = d.mid;
+      $('px').textContent = d.mid.toLocaleString(undefined,{maximumFractionDigits:1});
+      $('mid').textContent = d.mid.toLocaleString(undefined,{maximumFractionDigits:1});
+      if (sessionStart === null) sessionStart = d.mid;
+      var chg = (d.mid - sessionStart) / sessionStart * 100;
+      var ec = $('chg'); ec.textContent = (chg>=0?'+':'') + chg.toFixed(2) + '%';
+      ec.className = 'chg ' + (chg>=0?'b':'a');
+      $('hi').textContent = Math.max(d.mid, parseFloat($('hi').textContent)||0).toLocaleString();
+      var lo = parseFloat($('lo').textContent);
+      $('lo').textContent = (lo? Math.min(d.mid, lo) : d.mid).toLocaleString();
+      candle(d.t, d.mid);
+    }
+    drawBook(d.bids, d.asks);
+    if (d.trades && d.trades.length) { tape(d.trades); updateCandles(d.trades); }
+  };
 }
-function refresh() {
-  api('/info', {type:'allMids'}, m => {
-    document.getElementById('mids').textContent = 'BTC ' + (m.BTC || '—');
+function candle(t, px) {
+  var m = Math.floor(t/60000)*60000, c = candles[candles.length-1];
+  if (!c || c.t !== m) { candles.push({t:m,o:px,h:px,l:px,c:px}); if (candles.length>90) candles.shift(); }
+  else { c.c = px; c.h = Math.max(c.h,px); c.l = Math.min(c.l,px); }
+  drawChart();
+}
+function updateCandles(trades){
+  trades.forEach(tr => { var m = Math.floor(Date.now()/60000)*60000;
+    var c = candles[candles.length-1];
+    if (!c) return;
+    c.c = tr.px; c.h = Math.max(c.h,tr.px); c.l = Math.min(c.l,tr.px); });
+  drawChart();
+}
+function drawChart(){
+  var cv = $('chart'), ctx = cv.getContext('2d');
+  ctx.clearRect(0,0,cv.width,cv.height);
+  if (candles.length < 2) return;
+  var hi = Math.max(...candles.map(c=>c.h)), lo = Math.min(...candles.map(c=>c.l));
+  var pad = (hi-lo)*0.08 || 1;
+  hi += pad; lo -= pad;
+  var W = cv.width, H = cv.height, n = candles.length;
+  var w = W/n;
+  candles.forEach((c,i)=>{
+    var x = i*w;
+    var y = p => H - (p-lo)/(hi-lo)*H;
+    ctx.strokeStyle = c.c>=c.o ? '#0ecb81' : '#f6465d';
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.beginPath(); ctx.moveTo(x+w/2, y(c.h)); ctx.lineTo(x+w/2, y(c.l)); ctx.stroke();
+    var yo = y(c.o), yc = y(c.c);
+    ctx.fillRect(x+1, Math.min(yo,yc), Math.max(w-2,1), Math.abs(yc-yo)||1);
   });
-  api('/info', {type:'l2Book', coin:'BTC'}, b => {
-    if (!b || !b.levels) return;
-    var asks = (b.levels[1]||[]).slice(0, 8).reverse();
-    var bids = (b.levels[0]||[]).slice(0, 8);
-    document.getElementById('asks').innerHTML = asks.map(l =>
-      '<div class="row ask"><span>' + l[0] + '</span><span>' + l[1] +
-      '</span></div>').join('');
-    document.getElementById('bids').innerHTML = bids.map(l =>
-      '<div class="row bid"><span>' + l[0] + '</span><span>' + l[1] +
-      '</span></div>').join('');
-  });
-  var u = document.getElementById('user').value;
+  ctx.fillStyle = '#707a8a'; ctx.font = '10px monospace';
+  ctx.fillText(hi.toLocaleString(undefined,{maximumFractionDigits:0}), 4, 12);
+  ctx.fillText(lo.toLocaleString(undefined,{maximumFractionDigits:0}), 4, H-4);
+}
+function drawBook(bids, asks) {
+  var mx = Math.max(...bids.map(l=>l[1]), ...asks.map(l=>l[1]), 1);
+  $('bids').innerHTML = bids.slice(0,10).map(l =>
+    '<div class="row"><span class="b">'+l[0].toFixed(1)+'</span><span>'+l[1].toFixed(2)+'</span>'+
+    '<span class="bar b" style="width:'+Math.min(l[1]/mx*100,100)+'%"></span></div>').join('');
+  $('asks').innerHTML = asks.slice(0,10).reverse().map(l =>
+    '<div class="row"><span class="a">'+l[0].toFixed(1)+'</span><span>'+l[1].toFixed(2)+'</span>'+
+    '<span class="bar a" style="width:'+Math.min(l[1]/mx*100,100)+'%"></span></div>').join('');
+}
+var tapeLast = [];
+function tape(trs){
+  tapeLast = trs.slice(0,12);
+  $('tape').innerHTML = '<tr><th>price</th><th>size</th><th>side</th></tr>' +
+    tapeLast.map(t => '<tr><td class="'+(t.buy?'b':'a')+'">'+t.px.toFixed(1)+
+      '</td><td>'+t.sz.toFixed(3)+'</td><td>'+(t.buy?'BUY':'SELL')+'</td></tr>').join('');
+}
+function tab(el, id){
+  document.querySelectorAll('.tabs div').forEach(d=>d.classList.remove('on'));
+  el.classList.add('on'); CUR = id;
+  ['pos','oo','hist'].forEach(k => $(k).style.display = k===id?'block':'none');
+  refresh();
+}
+function refresh(){
+  var u = userEl.value;
   api('/info', {type:'userState', user:u}, s => {
-    document.getElementById('av').textContent = s.marginSummary.accountValue;
-    document.getElementById('wd').textContent = s.withdrawable || '—';
-    var t = '<tr><th>coin</th><th>size</th><th>entry</th><th>uPnL</th></tr>';
-    (s.assetPositions||[]).forEach(p => {
-      var q = p.position;
-      t += '<tr><td>' + q.coin + '</td><td>' + q.szi + '</td><td>' + q.entryPx +
-           '</td><td>' + q.unrealizedPnl + '</td></tr>';
-    });
-    document.getElementById('pos').innerHTML = t;
+    if (!s || !s.marginSummary) return;
+    var av = parseFloat(s.marginSummary.accountValue);
+    $('av').textContent = '$' + av.toLocaleString(undefined,{maximumFractionDigits:2});
+    if (av === 0) { faucet(true); return; }
+    var t = '';
+    (s.assetPositions||[]).forEach(p => { var q = p.position;
+      t += '<table><tr><th>coin</th><th>size</th><th>entry</th><th>uPnL</th></tr>'+
+        '<tr><td>'+q.coin+'</td><td class="'+(parseFloat(q.szi)>=0?'b':'a')+'">'+q.szi+
+        '</td><td>'+q.entryPx+'</td><td class="'+(parseFloat(q.unrealizedPnl)>=0?'b':'a')+'">'+
+        q.unrealizedPnl+'</td></tr></table>'; });
+    if (!t) t = '<div style="color:var(--dim);font-size:11px">no open positions</div>';
+    $('pos').innerHTML = t;
   });
   api('/info', {type:'openOrders', user:u}, oo => {
-    var t = '<tr><th>oid</th><th>side</th><th>px</th><th>sz</th><th></th></tr>';
-    oo.forEach(o => {
-      t += '<tr><td>' + o.oid + '</td><td>' + o.side + '</td><td>' + o.limitPx +
-        '</td><td>' + o.sz + '</td><td><a href="#" onclick="cancel(' + o.oid +
-        ');return false" style="color:var(--red)">x</a></td></tr>'; });
-    document.getElementById('oo').innerHTML = t;
-  });
-  fetch('/events?since=' + since).then(r => r.json()).then(e => {
-    (e.events||[]).forEach(ev => { if (ev.t === 'fill') since = Math.max(since, ev.tid); });
-    var t = '<tr><th>px</th><th>sz</th><th>side</th></tr>';
-    (e.events||[]).filter(ev => ev.t === 'fill').slice(-10).forEach(ev => {
-      t += '<tr><td>' + (ev.px/1e8) + '</td><td>' + (ev.sz/1e8) + '</td><td>' +
-        (ev.is_buy ? 'B' : 'A') + '</td></tr>';
-    });
-    document.getElementById('fills').innerHTML = t;
-  });
-  fetch('/chain/latest').then(r => r.json()).then(c => {
-    if (!c || !c.header) return;
-    document.getElementById('h').textContent = c.header.height;
-    document.getElementById('sh').textContent =
-      String(c.header.state_hash).slice(0, 18) + '…';
-    document.getElementById('chain').textContent = 'height ' + c.header.height;
+    var t = '<table><tr><th>oid</th><th>side</th><th>px</th><th>sz</th><th></th></tr>';
+    (oo||[]).forEach(o => { t += '<tr><td>'+o.oid+'</td><td class="'+(o.side==='B'?'b':'a')+'">'+
+      o.side+'</td><td>'+o.limitPx+'</td><td>'+o.sz+'</td><td><a href="#" style="color:var(--dn)" '+
+      'onclick="cancel('+o.oid+');return false">x</a></td></tr>'; });
+    $('oo').innerHTML = t + '</table>';
   });
 }
-function faucet() {
-  var u = document.getElementById('user').value;
-  api('/exchange', {action: {type:'faucet'}, nonce: Date.now(),
-                    signature: {signer: u}}, r => {
-    document.getElementById('msg').textContent =
-      r.status === 'ok' ? '+10,000 test USDC' : r.response;
+function faucet(auto){
+  api('/exchange', {action:{type:'faucet'}, nonce:Date.now(),
+    signature:{signer:userEl.value}}, r => {
+    if (r.status==='ok') toast(auto ? 'funded 10,000 test USDC (auto)' : '+10,000 test USDC');
     refresh();
   });
 }
-function cancel(oid) {
-  var u = document.getElementById('user').value;
-  api('/exchange', {action: {type:'cancel', coin:'BTC', oid:oid},
-                    nonce: Date.now(), signature: {signer: u}}, r => refresh());
+function cancel(oid){
+  api('/exchange', {action:{type:'cancel', coin:'BTC', oid:oid}, nonce:Date.now(),
+    signature:{signer:userEl.value}}, r => { toast(r.status==='ok'?'canceled':'cancel failed'); refresh(); });
 }
-function send(is_buy) {
-  var px = Math.round(parseFloat(document.getElementById('px').value) * 1e8);
-  var sz = Math.round(parseFloat(document.getElementById('sz').value) * 1e8);
-  api('/exchange', {
-    action: {type:'order', orders:[{coin:'BTC', is_buy:is_buy, limit_px:px,
-      sz:sz, tif:document.getElementById('tif').value}]},
-    nonce: Date.now(), signature: {signer: document.getElementById('user').value}
-  }, r => {
-    document.getElementById('msg').textContent =
-      r.status === 'ok' ? 'order sent: ' + JSON.stringify(r.response.statuses[0])
-                        : 'error: ' + r.response;
+function setpx(f){ var m = lastMid || 0;
+  $('px_in').value = (m*f).toFixed(1); }
+function send(is_buy){
+  var px = Math.round(parseFloat($('px_in').value||'0')*1e8);
+  var sz = Math.round(parseFloat($('sz_in').value||'0')*1e8);
+  if (!px || !sz) { toast('enter price and size'); return; }
+  api('/exchange', {action:{type:'order', orders:[{coin:'BTC', is_buy:is_buy,
+    limit_px:px, sz:sz, tif:$('tif').value}]}, nonce:Date.now(),
+    signature:{signer:userEl.value}}, r => {
+    if (r.status==='ok' && r.response.statuses[0].status==='filled')
+      toast('FILLED ' + (is_buy?'BUY ':'SELL ') + $('sz_in').value + ' BTC');
+    else if (r.status==='ok') toast('order: ' + r.response.statuses[0].status);
+    else toast('error: ' + r.response);
+    refresh();
   });
 }
-refresh();
-setInterval(refresh, 1500);
+function pollSlow(){
+  fetch('/chain/latest').then(r=>r.json()).then(c=>{
+    if (c.header) $('blk').textContent = c.header.height;
+  }).catch(()=>{});
+  refresh();
+}
+ws(); refresh(); setInterval(pollSlow, 3000);
 </script>
 </body>
 </html>
