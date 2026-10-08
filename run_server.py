@@ -39,13 +39,23 @@ SEED_MIDS = {"BTC": 82_000, "ETH": 3_150, "SOL": 148, "XRP": 2.4,
 
 def q5(px):
     """Quantize an S-scaled int price to the 5-sig-fig tick (specs/05).
-    Whole-dollar floors trash fractional mids (DOGE 0.16, XRP 2.4)."""
+    INT-ONLY: 10 ** negative-exp is a float in Python, and float px breaks
+    px_valid's sig-fig check AND the engine's int-only money math."""
     import math
     usd = px / S
     if usd <= 0:
         return 1
-    q = 10 ** (int(math.floor(math.log10(usd))) - 4) * S
+    exp = int(math.floor(math.log10(usd)))
+    if exp >= 4:
+        q = 10 ** (exp - 4) * S
+    else:
+        q = max(1, S // (10 ** (4 - exp)))
     return max(1, (px // q) * q)
+
+
+def tick_of(coin):
+    """Smallest valid price step: 10^(2+szDecimals) S-units (specs/05)."""
+    return 10 ** (2 + ASSETS[coin]["sz_decimals"])
 
 
 def main():
@@ -115,10 +125,24 @@ def main():
     chain.submit(int(time.time()), seed2)
     nonce = [1000]
 
+    stats = {"filled": 0, "canceled": 0, "rejected": 0}
     def bot(user, action):
         nonce[0] += 1
-        return api.exchange({"action": action, "nonce": nonce[0],
-                             "signature": {"signer": user}})
+        r = api.exchange({"action": action, "nonce": nonce[0],
+                          "signature": {"signer": user}})
+        try:
+            st = r["response"]["statuses"][0]["status"]                 if r.get("status") == "ok" else r.get("response")
+            if st == "filled":
+                stats["filled"] += 1
+            elif st == "canceled":
+                stats["canceled"] += 1
+            else:
+                stats["rejected"] += 1
+                if stats["rejected"] % 25 == 1:
+                    print("BOT REJECT: %s action=%s" % (r, action), flush=True)
+        except Exception:
+            pass
+        return r
 
     tick = 0
     checks = ok = 0
@@ -138,8 +162,13 @@ def main():
             if rng.random() < 0.55:
                 side = rng.random() < (0.5 + drift[coin])
                 sz = rng.randint(2, 20) * S
-                px = max(100, (mid * 1009 // 1000) // 100 * 100) if side else \
-                    max(100, (mid * 991 // 1000) // 100 * 100)
+                # offset >= spread: on wide-for-size markets (DOGE +/- $0.01
+                # on $0.15) a fixed +/-0.9% never crosses
+                hf = max(q5(S // 100), mid // 200)
+                off = max(mid * 1009 // 1000 - mid, hf * 2)
+                off2 = max(mid - mid * 991 // 1000, hf * 2)
+                px = max(tick_of(coin), q5(mid + off)) if side else \
+                    max(tick_of(coin), q5(mid - off2))
                 bot("sim_bot", {"type": "order", "orders": [
                     {"coin": coin, "is_buy": bool(side), "limit_px": px,
                      "sz": sz, "tif": "IOC"}]})
@@ -149,7 +178,7 @@ def main():
                     pull = (SEED_MIDS[coin] * S - mid) // 64
                     d = 1 if drift[coin] > 0.05 else \
                         (-1 if drift[coin] < -0.05 else 0)
-                    new_oracle = mid + pull + (mid // 400) * d
+                    new_oracle = q5(mid + pull + (mid // 400) * d)
                     bot("oracle_feed", {"type": "oracle", "coin": coin,
                                         "px": new_oracle})
         # lp re-quotes every 1s around each moving mid (via API)
@@ -162,14 +191,17 @@ def main():
                                        "oid": oid})
                 m2 = bb.mid() or mids[coin]
                 half = max(q5(S // 100), m2 // 200)  # >=1 tick spread
-                # momentum migrates the band by a FRACTION of the mid
-                # (absolute dollars were 46% of SOL's price, 2.4x HYPE's)
-                sk = m2 * int(drift[coin] * 100) // 40_000
+                # drift TILTS the band (tightens the side momentum favors)
+                # but the band center stays ON the mid: a center shift makes
+                # the band lead the mid and the mid chase it -> ratchet
+                tilt = m2 * int(drift[coin] * 100) // 40_000
                 for i in range(3):
                     for is_buy in (True, False):
-                        base = m2 + sk * 2
-                        px_off = max(1, q5(base + (half + i * 5 * S) *
-                                    (1 if not is_buy else -1)))
+                        lvl = max(tick_of(coin), m2 // 4_000)
+                        px_off = max(tick_of(coin),
+                                     q5(m2 + (half + i * lvl) *
+                                        (-1 if is_buy else 1) +
+                                        (tilt if is_buy else -tilt)))
                         bot("lp_bot", {"type": "order", "orders": [
                             {"coin": coin, "is_buy": is_buy,
                              "limit_px": px_off, "sz": 50 * S,
