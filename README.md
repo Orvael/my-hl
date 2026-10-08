@@ -24,9 +24,20 @@ engine claims were re-verified against those live pages.
 ## Layout
 
     specs/   verified engine rules (quote + engine mapping per page)
-    hl/      config, num, types, book (CLOB), clearing (margin/funding/liq/adl),
-             engine (blocks, deterministic), journal (replay + state hash)
-    tests/   zero-dependency assert tests (9 scenarios)
+    hl/      config, num, types, book (CLOB), clearing, engine, journal,
+             oracle (validator oracle + robust mark), triggers (TP/SL, OCO,
+             TWAP), spot (HIP-1, spot books, HIP-2 Hyperliquidity),
+             hip3 (builder-deployed perps), bridge (validator-signed),
+             evm_side (sidecar sim: system addresses, CoreWriter,
+             precompiles), consensus (HyperBFT-style sim with jailing)
+    tests/   zero-dependency assert tests (25 scenarios, all green)
+
+## v2 layers added (each simulated faithfully to specs/06-11)
+Oracle aggregation (stake-weighted median), robust mark price (3-input median
+with EMAs), margin tiers, isolated margin, partial liquidations, order caps,
+trigger orders, spot trading, HIP-1 tokens, HIP-2 quoter, HIP-3 builder perps
+(stake, auctions, fee share, halt), validator bridge with dispute window,
+EVM sidecar architecture, multi-node consensus with jailing.
 
 ## v1 simplifications (each documented in specs/)
 - mark = oracle (robust index = v2)
