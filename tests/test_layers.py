@@ -90,6 +90,7 @@ def test_evm_side():
     e.send_asset_core_to_evm("user1", "user1", 5, 100)
     e.process_block(11)
     check(e.bal("user1", 5) == 700, "evm-credited-next-block")
+    e.native["user1"] = 100_000_000  # fund gas
     e.corewriter("user1", 1, b"payload", 20)
     tr, cw = e.process_block(23)
     check(len(cw) == 1 and cw[0]["action_id"] == 1, "evm-cw-delayed")

@@ -50,8 +50,13 @@ class EvmSide:
         self.core_to_evm.append({"user": core_user, "addr": addr,
                                  "idx": idx, "wei": wei})
 
-    def corewriter(self, actor, action_id, payload, ts, delay_s=3):
-        """specs/11: version byte 1 + 3-byte BE action id + payload; delayed."""
+    def corewriter(self, actor, action_id, payload, ts, delay_s=3,
+                   gas_price=1_000):
+        """specs/11 + 13: burns native HYPE gas from the actor's balance."""
+        cost = 25_000 * gas_price
+        if self.native.get(actor, 0) < cost:
+            return "no_gas"
+        self.native[actor] = self.native.get(actor, 0) - cost
         blob = bytes([1, (action_id >> 16) & 255, (action_id >> 8) & 255,
                       action_id & 255]) + payload
         self.gas_used += 25_000

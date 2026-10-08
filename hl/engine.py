@@ -30,6 +30,12 @@ class Engine:
         self.premium_samples = {}
         self.premium_samples_ts = {}
         self.builder = None  # (builder_addr, fee_bps) set per API order
+        self.volume = {}          # user -> cumulative traded USD (14d in prod)
+        self.spot_volume = {}     # kept by the spot layer, 2x weight (fees.md)
+        self.referrals = {}       # referred_user -> referrer
+        self.referral_rewards = {}  # referrer -> usd accrued
+        self.points = {}          # user -> points (airdrop distribution)
+        self.delisted = set()
 
     def mark(self, coin):
         """specs/06 robust mark; falls back to oracle if never computed."""
@@ -61,20 +67,79 @@ class Engine:
         self._settle_fills(user, coin, is_buy, fills)
         return status, fills
 
+    FEE_TAKER_TIERS = [45_000, 40_000, 35_000, 30_000, 28_000, 26_000, 24_000]
+    FEE_MAKER_TIERS = [15_000, 12_000, 8_000, 4_000, 0, 0, 0]
+    TIER_BOUNDS = [5_000_000, 25_000_000, 100_000_000, 500_000_000,
+                   2_000_000_000, 7_000_000_000]
+
+    def fee_tier(self, user):
+        """specs/13: 14d weighted volume = perps + 2x spot (fees.md)."""
+        v = self.volume.get(user, 0) + 2 * self.spot_volume.get(user, 0)
+        tier = 0
+        for i, b in enumerate(self.TIER_BOUNDS):
+            if v > b * SCALE:
+                tier = i + 1
+            else:
+                break
+        return tier
+
+    def taker_fee_for(self, user):
+        rate = self.FEE_TAKER_TIERS[self.fee_tier(user)]
+        if user in self.referrals and self.volume.get(user, 0) < 25_000_000 * SCALE:
+            rate = rate * 96 // 100  # 4% referral discount, first $25M
+        return rate
+
+    def refer(self, referrer, new_user):
+        """specs/13: code requires $10k volume; referred gets 4% discount,
+        referrer earns 10% of their fees."""
+        if self.volume.get(referrer, 0) < 10_000 * SCALE:
+            return False, "code_needs_10k_volume"
+        self.referrals[new_user] = referrer
+        return True, "ok"
+
+    def delist(self, coin, settle_px):
+        """specs/13: settle to the 1h time-weighted spot oracle (caller
+        supplies the TWAP px), cancel all orders, no new orders accepted."""
+        for oid in list(self.books[coin].orders):
+            self.books[coin].cancel(oid)
+        settled = 0
+        for user in sorted(self.ch.accounts):
+            pos = self.ch.acc(user).positions.get(coin)
+            if pos is None or pos.szi == 0:
+                continue
+            side = 1 if pos.szi > 0 else -1
+            realized = qdiv(side * (settle_px - pos.entry_px) * abs(pos.szi),
+                            SCALE)
+            self.ch.acc(user).usd += realized
+            del self.ch.acc(user).positions[coin]
+            settled += 1
+        self.delisted.add(coin)
+        return settled
+
     def _settle_fills(self, user, coin, is_buy, fills):
         for f in fills:
             notl = f["px"] * f["sz"] // SCALE
-            fee_t = qdiv(notl * TAKER_FEE, SCALE)
-            fee_m = qdiv(notl * MAKER_FEE, SCALE)
+            self.volume[user] = self.volume.get(user, 0) + notl
+            maker = f["maker_user"]
+            self.volume[maker] = self.volume.get(maker, 0) + notl
+            fee_t = qdiv(notl * self.taker_fee_for(user), SCALE)
+            fee_m = qdiv(notl * self.FEE_MAKER_TIERS[
+                self.fee_tier(maker)], SCALE)
             if self.builder:
                 fee_b = qdiv(notl * self.builder[1], 10_000)
                 fee_t += fee_b
                 self.ch.acc(self.builder[0]).usd += fee_b
             self.ch.acc(user).usd -= fee_t
             self.ch.acc(VAULT_FEES).usd += fee_t
-            maker = f["maker_user"]
             self.ch.acc(maker).usd -= fee_m
             self.ch.acc(VAULT_FEES).usd += fee_m
+            if user in self.referrals and fee_t:
+                ref = self.referrals[user]
+                share = qdiv(fee_t, 10)
+                self.referral_rewards[ref] = self.referral_rewards.get(ref, 0) \
+                    + share
+                self.ch.acc(ref).usd += share
+                self.ch.acc(VAULT_FEES).usd -= share
             self.ch.apply_side(user, coin, is_buy, f["px"], f["sz"], 0)
             self.ch.apply_side(maker, coin, not is_buy, f["px"], f["sz"], 0)
             if f["maker_oid"] not in self.books[coin].orders:
@@ -118,6 +183,8 @@ class Engine:
         """tp/sl: OCO child specs {kind, trigger_px, limit_px?} (specs/08)."""
         if coin not in self.assets:
             return None, "no_coin"
+        if coin in self.delisted:
+            return None, "delisted"
         if tif not in TIFS:
             return None, "bad_tif"
         if not self.px_valid(coin, px):
@@ -467,6 +534,12 @@ class Engine:
                     events.append({"t": "reject", "op": "withdraw", "user": a["user"]})
             elif t == "oracle":
                 self.set_oracle(a["coin"], a["px"])
+            elif t == "points":
+                self.points[a["user"]] = self.points.get(a["user"], 0) + a["pts"]
+            elif t == "refer":
+                ok, why = self.refer(a["referrer"], a["new_user"])
+                if not ok:
+                    events.append({"t": "reject", "op": "refer", "why": why})
             elif t == "ext_px":
                 self.ext.setdefault(a["coin"], {})[a["src"]] = a["px"]
             elif t == "place_trigger":

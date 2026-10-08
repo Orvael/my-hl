@@ -33,6 +33,7 @@ class ApiState:
         self.rate = {}              # user -> (window_ts, count)
         self.rate_limit = 100       # requests per window
         self.rate_window_s = 10
+        self.multisig = {}          # user -> {authorized, threshold}
 
     # ---- /info ----
 
@@ -184,9 +185,10 @@ class ApiState:
                 self.used_nonces.clear()
             if not self.rate_check(user):
                 return {"status": "err", "response": "rate_limit"}
-            return self._dispatch(user, req.get("action", {}))
+            return self._dispatch(user, req.get("action", {}),
+                                  leader=req.get("signature", {}).get("signer"))
 
-    def _dispatch(self, user, action):
+    def _dispatch(self, user, action, leader=None):
         e = self.engine
         t = action.get("type")
         if t == "order":
@@ -219,6 +221,24 @@ class ApiState:
             ok = e.books[action["coin"]].cancel(action["oid"])
             return {"status": "ok" if ok else "err",
                     "response": "canceled" if ok else "unknown_oid"}
+        if t == "convertToMultiSigUser":
+            if len(action.get("authorized", [])) > 10:
+                return {"status": "err", "response": "max_10_authorized"}
+            self.multisig[user] = {"authorized": action["authorized"],
+                                   "threshold": action["threshold"]}
+            return {"status": "ok", "response": "converted"}
+        if t == "multiSig":
+            ms = self.multisig.get(action.get("target", user))
+            if ms is None:
+                return {"status": "err", "response": "not_multisig"}
+            leader = leader or user
+            if leader not in ms["authorized"]:
+                return {"status": "err", "response": "leader_not_authorized"}
+            sigs = set(action.get("signatures", []))
+            if len(sigs & set(ms["authorized"])) < ms["threshold"]:
+                return {"status": "err", "response": "below_threshold"}
+            return self._dispatch(action["target"], action.get("inner_action", {}),
+                                  leader=leader)
         if t == "approveApiWallet":
             self.api_wallets[action["api_wallet"]] = user
             return {"status": "ok", "response": "approved"}
@@ -248,9 +268,13 @@ class ApiState:
         return [ev for ev in self.events if ev["tid"] > since]
 
 
-def make_server(api_state, host="127.0.0.1", port=0):
-    """ThreadingHTTPServer with the real surface: POST /info, POST /exchange,
-    GET /events?since=N, GET /health. Port 0 = ephemeral (for tests)."""
+def make_server(api_state, chain=None, host="127.0.0.1", port=0):
+    """ThreadingHTTPServer with the real surface: GET / (trading UI),
+    POST /info, POST /exchange, GET /events?since=N, GET /chain/latest,
+    GET /block/{h}, GET /health. Port 0 = ephemeral (for tests)."""
+    import os
+    static_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "static", "index.html")
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -264,6 +288,38 @@ def make_server(api_state, host="127.0.0.1", port=0):
             self.end_headers()
             self.wfile.write(body)
 
+        def _html(self, code, body):
+            self.send_response(code)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path == "/" or self.path.startswith("/index"):
+                with open(static_path, "rb") as fp:
+                    return self._html(200, fp.read())
+            if self.path == "/health":
+                return self._json(200, {"status": "ok"})
+            if self.path == "/chain/latest":
+                if chain is None:
+                    return self._json(404, {"error": "no_chain"})
+                h = chain.head().header
+                return self._json(200, {"header": h})
+            if self.path.startswith("/block/"):
+                if chain is None:
+                    return self._json(404, {"error": "no_chain"})
+                h = int(self.path.split("/block/")[1].split("?")[0])
+                return self._json(200, chain.to_json(h))
+            if self.path.startswith("/events"):
+                since = 0
+                if "since=" in self.path:
+                    since = int(self.path.split("since=")[1].split("&")[0])
+                with api_state.lock:
+                    return self._json(200,
+                                      {"events": api_state.events_since(since)})
+            return self._json(404, {"error": "not_found"})
+
         def do_POST(self):
             n = int(self.headers.get("Content-Length", 0))
             try:
@@ -275,17 +331,6 @@ def make_server(api_state, host="127.0.0.1", port=0):
                     return self._json(200, api_state.info(req))
             if self.path == "/exchange":
                 return self._json(200, api_state.exchange(req))
-            return self._json(404, {"error": "not_found"})
-
-        def do_GET(self):
-            if self.path == "/health":
-                return self._json(200, {"status": "ok"})
-            if self.path.startswith("/events"):
-                since = 0
-                if "since=" in self.path:
-                    since = int(self.path.split("since=")[1].split("&")[0])
-                with api_state.lock:
-                    return self._json(200, {"events": api_state.events_since(since)})
             return self._json(404, {"error": "not_found"})
 
     srv = ThreadingHTTPServer((host, port), Handler)

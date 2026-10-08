@@ -233,6 +233,19 @@ class SpotStore:
         self.tokens[new_idx].supply = minted
         return minted
 
+    def distribute_by_points(self, idx, wei_total, points):
+        """specs/13: genesis distribution by points share (ref 2.17/6.x)."""
+        total_pts = sum(points.values())
+        if total_pts <= 0:
+            return 0
+        minted = 0
+        for user, pts in sorted(points.items()):
+            wei = qdiv(pts * wei_total, total_pts)
+            self._add(user, idx, wei)
+            minted += wei
+        self.tokens[idx].supply += minted
+        return minted
+
     def dust_pass(self, base_idx, mid_px):
         """specs/09: aggregate per-user dust (< 1 lot, <= $1 notional),
         market-sell it, return USDC weighted by dust share.

@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<!-- Created: WIB 2026-10-08 18:33 -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>my-hl — Hyperliquid imitation</title>
+<style>
+  :root { --bg:#0b0e11; --panel:#14181d; --line:#1f262e; --green:#1db954;
+          --red:#f6465d; --text:#eaecef; --dim:#848e9c; }
+  * { box-sizing:border-box; margin:0; font-family:ui-monospace,Menlo,monospace; }
+  body { background:var(--bg); color:var(--text); padding:14px; }
+  h1 { font-size:15px; color:var(--dim); margin-bottom:10px; }
+  .grid { display:grid; grid-template-columns:280px 1fr 300px; gap:12px; }
+  .panel { background:var(--panel); border:1px solid var(--line);
+           border-radius:8px; padding:10px; }
+  .panel h2 { font-size:11px; color:var(--dim); text-transform:uppercase;
+              letter-spacing:.08em; margin-bottom:8px; }
+  .row { display:flex; justify-content:space-between; padding:2px 4px;
+         font-size:12px; }
+  .bid { color:var(--green); } .ask { color:var(--red); }
+  input,select { background:var(--bg); border:1px solid var(--line);
+                 color:var(--text); border-radius:6px; padding:6px;
+                 width:100%; font-size:12px; margin-bottom:6px; }
+  button { width:100%; padding:8px; border:0; border-radius:6px; cursor:pointer;
+           font-weight:bold; color:#fff; font-size:12px; }
+  .buy { background:var(--green); } .sell { background:var(--red); }
+  table { width:100%; font-size:12px; border-collapse:collapse; }
+  th,td { text-align:right; padding:3px 6px; border-bottom:1px solid var(--line); }
+  th { color:var(--dim); font-weight:normal; font-size:10px; }
+  #mids { font-size:18px; padding:4px 2px; }
+  .flash { animation:f .5s; } @keyframes f { from{background:#2a3f00} }
+</style>
+</head>
+<body>
+<h1>my-hl · deterministic Hyperliquid imitation · <span id="chain">chain</span></h1>
+<div class="grid">
+  <div>
+    <div class="panel">
+      <h2>Order book · <span id="coin">BTC</span></h2>
+      <div id="asks"></div>
+      <div id="mids">—</div>
+      <div id="bids"></div>
+    </div>
+    <div class="panel" style="margin-top:12px">
+      <h2>Place order</h2>
+      <select id="side"><option value="true">BUY</option>
+        <option value="false">SELL</option></select>
+      <input id="px" placeholder="price (usd)">
+      <input id="sz" placeholder="size (units)">
+      <select id="tif"><option>GTC</option><option>IOC</option>
+        <option>ALO</option></select>
+      <button class="buy" onclick="send(true)">BUY</button>
+      <button class="sell" onclick="send(false)">SELL</button>
+      <div id="msg" style="font-size:11px;color:var(--dim);margin-top:6px"></div>
+    </div>
+  </div>
+  <div>
+    <div class="panel">
+      <h2>Positions</h2>
+      <table id="pos"><tr><th>coin</th><th>size</th><th>entry</th>
+        <th>mark</th><th>uPnL</th></tr></table>
+      <h2 style="margin-top:12px">Recent fills</h2>
+      <table id="fills"></table>
+    </div>
+  </div>
+  <div>
+    <div class="panel">
+      <h2>Account</h2>
+      <input id="user" value="trader1" placeholder="account">
+      <div class="row"><span>account value</span><b id="av">—</b></div>
+      <div class="row"><span>withdrawable</span><b id="wd">—</b></div>
+    </div>
+    <div class="panel" style="margin-top:12px">
+      <h2>Chain</h2>
+      <div class="row"><span>height</span><b id="h">—</b></div>
+      <div class="row"><span>state hash</span><span id="sh" style="font-size:9px">—</span></div>
+    </div>
+  </div>
+</div>
+<script>
+var since = 0;
+function api(path, body, cb) {
+  fetch(path, body ? {method:'POST', headers:{'Content-Type':'application/json'},
+                      body:JSON.stringify(body)} : {})
+    .then(r => r.json()).then(cb);
+}
+function refresh() {
+  api('/info', {type:'allMids'}, m => {
+    document.getElementById('mids').textContent = 'BTC ' + (m.BTC || '—');
+  });
+  api('/info', {type:'l2Book', coin:'BTC'}, b => {
+    if (!b || !b.levels) return;
+    var asks = (b.levels[1]||[]).slice(0, 8).reverse();
+    var bids = (b.levels[0]||[]).slice(0, 8);
+    document.getElementById('asks').innerHTML = asks.map(l =>
+      '<div class="row ask"><span>' + l[0] + '</span><span>' + l[1] +
+      '</span></div>').join('');
+    document.getElementById('bids').innerHTML = bids.map(l =>
+      '<div class="row bid"><span>' + l[0] + '</span><span>' + l[1] +
+      '</span></div>').join('');
+  });
+  var u = document.getElementById('user').value;
+  api('/info', {type:'userState', user:u}, s => {
+    document.getElementById('av').textContent = s.marginSummary.accountValue;
+    document.getElementById('wd').textContent = s.withdrawable || '—';
+    var t = '<tr><th>coin</th><th>size</th><th>entry</th><th>uPnL</th></tr>';
+    (s.assetPositions||[]).forEach(p => {
+      var q = p.position;
+      t += '<tr><td>' + q.coin + '</td><td>' + q.szi + '</td><td>' + q.entryPx +
+           '</td><td>' + q.unrealizedPnl + '</td></tr>';
+    });
+    document.getElementById('pos').innerHTML = t;
+  });
+  api('/info', {type:'openOrders', user:u}, oo => {
+    var t = '<tr><th>oid</th><th>side</th><th>px</th><th>sz</th></tr>';
+    oo.forEach(o => { t += '<tr><td>' + o.oid + '</td><td>' + o.side +
+      '</td><td>' + o.limitPx + '</td><td>' + o.sz + '</td></tr>'; });
+  });
+  fetch('/events?since=' + since).then(r => r.json()).then(e => {
+    (e.events||[]).forEach(ev => { if (ev.t === 'fill') since = Math.max(since, ev.tid); });
+    var t = '<tr><th>px</th><th>sz</th><th>side</th></tr>';
+    (e.events||[]).filter(ev => ev.t === 'fill').slice(-10).forEach(ev => {
+      t += '<tr><td>' + (ev.px/1e8) + '</td><td>' + (ev.sz/1e8) + '</td><td>' +
+        (ev.is_buy ? 'B' : 'A') + '</td></tr>';
+    });
+    document.getElementById('fills').innerHTML = t;
+  });
+  fetch('/chain/latest').then(r => r.json()).then(c => {
+    if (!c || !c.header) return;
+    document.getElementById('h').textContent = c.header.height;
+    document.getElementById('sh').textContent =
+      String(c.header.state_hash).slice(0, 18) + '…';
+    document.getElementById('chain').textContent = 'height ' + c.header.height;
+  });
+}
+function send(is_buy) {
+  var px = Math.round(parseFloat(document.getElementById('px').value) * 1e8);
+  var sz = Math.round(parseFloat(document.getElementById('sz').value) * 1e8);
+  api('/exchange', {
+    action: {type:'order', orders:[{coin:'BTC', is_buy:is_buy, limit_px:px,
+      sz:sz, tif:document.getElementById('tif').value}]},
+    nonce: Date.now(), signature: {signer: document.getElementById('user').value}
+  }, r => {
+    document.getElementById('msg').textContent =
+      r.status === 'ok' ? 'order sent: ' + JSON.stringify(r.response.statuses[0])
+                        : 'error: ' + r.response;
+  });
+}
+refresh();
+setInterval(refresh, 1500);
+</script>
+</body>
+</html>
