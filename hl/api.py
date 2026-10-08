@@ -5,6 +5,7 @@
 # stream with the same payloads. The ENGINE stays untouched and deterministic;
 # only the API layer uses wall time (rate limiting).
 import json
+import time
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -34,6 +35,8 @@ class ApiState:
         self.rate_limit = 100       # requests per window
         self.rate_window_s = 10
         self.multisig = {}          # user -> {authorized, threshold}
+        self.action_log = []        # (ts, action) for block production
+        self.faucet_given = set()
 
     # ---- /info ----
 
@@ -185,8 +188,11 @@ class ApiState:
                 self.used_nonces.clear()
             if not self.rate_check(user):
                 return {"status": "err", "response": "rate_limit"}
-            return self._dispatch(user, req.get("action", {}),
-                                  leader=req.get("signature", {}).get("signer"))
+            action = req.get("action", {})
+            result = self._dispatch(user, action,
+                                    leader=req.get("signature", {}).get("signer"))
+            self.action_log.append((int(time.time()), action))
+            return result
 
     def _dispatch(self, user, action, leader=None):
         e = self.engine
@@ -239,6 +245,16 @@ class ApiState:
                 return {"status": "err", "response": "below_threshold"}
             return self._dispatch(action["target"], action.get("inner_action", {}),
                                   leader=leader)
+        if t == "faucet":
+            """Testnet money: once per account (specs/14)."""
+            if not hasattr(self, "faucet_given"):
+                self.faucet_given = set()
+            if user in self.faucet_given:
+                return {"status": "err", "response": "already_fauceted"}
+            amt = 10_000 * 10 ** 8
+            self.engine.deposit(user, amt)
+            self.faucet_given.add(user)
+            return {"status": "ok", "response": "fauceted_10000_usdc"}
         if t == "approveApiWallet":
             self.api_wallets[action["api_wallet"]] = user
             return {"status": "ok", "response": "approved"}

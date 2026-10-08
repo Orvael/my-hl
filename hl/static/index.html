@@ -66,9 +66,15 @@
   <div>
     <div class="panel">
       <h2>Account</h2>
-      <input id="user" value="trader1" placeholder="account">
+      <input id="user" value="trader1" placeholder="your account name">
       <div class="row"><span>account value</span><b id="av">—</b></div>
       <div class="row"><span>withdrawable</span><b id="wd">—</b></div>
+      <button style="background:#2a6f97;margin-top:8px"
+              onclick="faucet()">GET 10,000 TEST USDC</button>
+    </div>
+    <div class="panel" style="margin-top:12px">
+      <h2>Open orders</h2>
+      <table id="oo"></table>
     </div>
     <div class="panel" style="margin-top:12px">
       <h2>Chain</h2>
@@ -112,9 +118,12 @@ function refresh() {
     document.getElementById('pos').innerHTML = t;
   });
   api('/info', {type:'openOrders', user:u}, oo => {
-    var t = '<tr><th>oid</th><th>side</th><th>px</th><th>sz</th></tr>';
-    oo.forEach(o => { t += '<tr><td>' + o.oid + '</td><td>' + o.side +
-      '</td><td>' + o.limitPx + '</td><td>' + o.sz + '</td></tr>'; });
+    var t = '<tr><th>oid</th><th>side</th><th>px</th><th>sz</th><th></th></tr>';
+    oo.forEach(o => {
+      t += '<tr><td>' + o.oid + '</td><td>' + o.side + '</td><td>' + o.limitPx +
+        '</td><td>' + o.sz + '</td><td><a href="#" onclick="cancel(' + o.oid +
+        ');return false" style="color:var(--red)">x</a></td></tr>'; });
+    document.getElementById('oo').innerHTML = t;
   });
   fetch('/events?since=' + since).then(r => r.json()).then(e => {
     (e.events||[]).forEach(ev => { if (ev.t === 'fill') since = Math.max(since, ev.tid); });
@@ -132,6 +141,20 @@ function refresh() {
       String(c.header.state_hash).slice(0, 18) + '…';
     document.getElementById('chain').textContent = 'height ' + c.header.height;
   });
+}
+function faucet() {
+  var u = document.getElementById('user').value;
+  api('/exchange', {action: {type:'faucet'}, nonce: Date.now(),
+                    signature: {signer: u}}, r => {
+    document.getElementById('msg').textContent =
+      r.status === 'ok' ? '+10,000 test USDC' : r.response;
+    refresh();
+  });
+}
+function cancel(oid) {
+  var u = document.getElementById('user').value;
+  api('/exchange', {action: {type:'cancel', coin:'BTC', oid:oid},
+                    nonce: Date.now(), signature: {signer: u}}, r => refresh());
 }
 function send(is_buy) {
   var px = Math.round(parseFloat(document.getElementById('px').value) * 1e8);

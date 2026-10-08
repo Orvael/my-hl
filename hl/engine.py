@@ -558,7 +558,9 @@ class Engine:
                 st, fills = self.place(a["user"], a["coin"], a["is_buy"],
                                        a["px"], a["sz"], a.get("tif", "GTC"),
                                        a.get("reduce_only", False))
-                if fills:
+                if st is None:
+                    events.append({"t": "reject", "op": "place", "why": fills})
+                elif fills:
                     events.extend(dict(f, t="fill", taker=a["user"]) for f in fills)
                 elif st == "canceled":
                     events.append({"t": "cancel", "oid": a.get("oid"), "user": a["user"]})
