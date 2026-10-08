@@ -251,8 +251,11 @@ tbody tr:hover td,tr:hover td{background:rgba(255,255,255,.025)}
     <div class="stat"><span>Session range</span><b id="srange" class="num">—</b></div>
   </div>
   <div class="grid3">
-    <div class="panel"><h4>Order book</h4>
-      <div id="asks"></div><div class="mid" id="mid">—</div><div id="bids"></div></div>
+    <div class="panel"><h4>Order book <span class="ht">BTC-USDC</span></h4>
+      <div class="bcols"><span>Price</span><span>Size</span><span>Total</span></div>
+      <div id="asks"></div>
+      <div class="mid"><span id="mid">—</span><span class="sp num" id="spr"></span></div>
+      <div id="bids"></div></div>
     <div class="panel">
       <h4>BTC-USDC <span class="ht">1m · candles</span></h4>
       <div class="ctabs" id="ctabs"></div>
@@ -393,13 +396,16 @@ tbody tr:hover td,tr:hover td{background:rgba(255,255,255,.025)}
   <button class="btn gray" style="width:100%;margin-top:6px" onclick="closeM('m_dep')">Close</button>
 </div></div>
 
-<div id="toast"></div>
+<div id="toast" style="display:none"></div>
 <script>
 var ME = localStorage.getItem('myhl_user') || null;
 var lastMid = null, candles = [], chart = null, series = null;
 var $ = id => document.getElementById(id);
-function toast(m){var t=$('toast');t.textContent=m;t.style.display='block';
-  clearTimeout(t._h);t._h=setTimeout(()=>t.style.display='none',2600)}
+function toast(m,cls){var c=$('toasts'),d=document.createElement('div');
+  d.className='tst '+(cls||'info');d.textContent=m;c.appendChild(d);
+  while(c.children.length>4)c.removeChild(c.firstChild);
+  setTimeout(()=>{d.style.animation='tsout .22s forwards';
+    setTimeout(()=>d.remove(),230)},3200)}
 function api(p,b,cb){fetch(p,b?{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify(b)}:{}).then(r=>r.json()).then(cb).catch(()=>{})}
 
@@ -416,48 +422,136 @@ document.querySelectorAll('nav a[data-p]').forEach(a => {
 function initChart(){
   if (typeof LightweightCharts === 'undefined') return;
   chart = LightweightCharts.createChart($('chart'), {
-    layout:{background:{color:'#12161c'},textColor:'#707a8a'},
-    grid:{vertLines:{color:'#1c232c'},horzLines:{color:'#1c232c'}},
-    timeScale:{timeVisible:true},height:380});
+    autoSize:true,
+    layout:{background:{color:'#0f141b'},textColor:'#8b96a5',
+      fontFamily:'"SF Mono",ui-monospace,Menlo,monospace',fontSize:10},
+    grid:{vertLines:{color:'#161d28'},horzLines:{color:'#161d28'}},
+    rightPriceScale:{borderColor:'#1c2530'},
+    timeScale:{borderColor:'#1c2530',timeVisible:true,secondsVisible:false,
+      rightOffset:6},
+    crosshair:{mode:0,
+      vertLine:{color:'#50d2c1',width:1,style:2,labelBackgroundColor:'#134b44'},
+      horzLine:{color:'#50d2c1',width:1,style:2,labelBackgroundColor:'#134b44'}},
+    height:400});
   series = chart.addCandlestickSeries({upColor:'#0ecb81',downColor:'#f6465d',
     borderVisible:false,wickUpColor:'#0ecb81',wickDownColor:'#f6465d'});
 }
 function pushCandle(t, px){
   var m = Math.floor(t/60000)*60000;
-  var c = {time:m, open:px, high:px, low:px, close:px};
   var last = candles[candles.length-1];
-  if (last && last.time === m){ last.close=px; last.high=Math.max(last.high,px);
-    last.low=Math.min(last.low,px); }
-  else { candles.push(c); if (candles.length>200) candles.shift(); }
-  if (series) series.setData(candles);
+  if (last && last.time === m){
+    last.close=px; last.high=Math.max(last.high,px);
+    last.low=Math.min(last.low,px);
+    if (series) series.update(last);
+  } else {
+    var c = {time:m, open:px, high:px, low:px, close:px};
+    candles.push(c); if (candles.length>420) candles.shift();
+    if (series) series.update(c);
+    saveC();
+  }
 }
+var saveT=0;
+function saveC(){ clearTimeout(saveT); saveT=setTimeout(()=>{
+  try{localStorage.setItem('myhl_candles',
+    JSON.stringify(candles.slice(-400)))}catch(e){}},800)}
+function backfill(){
+  var map={};
+  try{(JSON.parse(localStorage.getItem('myhl_candles')||'[]'))
+    .forEach(c=>{map[c.time]=c;});}catch(e){}
+  api('/events?since=0',null,r=>{
+    ((r&&r.events)||[]).forEach(ev=>{
+      if (ev.t!=='fill'||ev.coin!==COIN) return;
+      var m = Math.floor(ev.ts*1000/60000)*60000, px = ev.px/1e8;
+      var c = map[m];
+      if (!c){ c={time:m,open:px,high:px,low:px,close:px}; map[m]=c; }
+      c.high=Math.max(c.high,px); c.low=Math.min(c.low,px); c.close=px;
+    });
+    candles = Object.keys(map).map(k=>map[k])
+      .sort((a,b)=>a.time-b.time).slice(-400);
+    if (series && candles.length) series.setData(candles);
+    saveC();
+  });
+}
+var COIN='BTC', WS=null, prevPx=null, BOOK={bids:[],asks:[]};
 function ws(){
-  var s = new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
-  s.onclose = () => setTimeout(ws, 1500);
-  s.onmessage = ev => { var d = JSON.parse(ev.data);
-    if (d.mid){ lastMid = d.mid;
-      $('px').textContent = d.mid.toLocaleString(undefined,{maximumFractionDigits:1});
-      $('mid').textContent = d.mid.toLocaleString(undefined,{maximumFractionDigits:1});
-      pushCandle(d.t, d.mid); }
-    var mx = Math.max(...(d.bids||[]).map(l=>l[1]), ...(d.asks||[]).map(l=>l[1]), 1);
-    $('bids').innerHTML = (d.bids||[]).slice(0,11).map(l=>
-      '<div class="row"><span class="b">'+l[0].toFixed(1)+'</span><span>'+l[1].toFixed(2)+
-      '</span><span class="bar" style="width:'+Math.min(l[1]/mx*100,100)+'%;background:var(--up)"></span></div>').join('');
-    $('asks').innerHTML = (d.asks||[]).slice(0,11).reverse().map(l=>
-      '<div class="row"><span class="a">'+l[0].toFixed(1)+'</span><span>'+l[1].toFixed(2)+
-      '</span><span class="bar" style="width:'+Math.min(l[1]/mx*100,100)+'%;background:var(--dn)"></span></div>').join('');
-    BOOK.bids = d.bids||[]; BOOK.asks = d.asks||[]; drawDepth();
-    var trs = (d.trades||[]).slice(0,12);
-    $('tape').innerHTML = '<tr><th>price</th><th>size</th><th>side</th></tr>' +
-      trs.map(t=>'<tr><td class="'+(t.buy?'b':'a')+'">'+t.px.toFixed(1)+'</td><td>'+
-        t.sz.toFixed(3)+'</td><td>'+(t.buy?'BUY':'SELL')+'</td></tr>').join('');
+  WS = new WebSocket((location.protocol==='https:'?'wss://':'ws://')+
+    location.host+'/ws');
+  WS.onopen = () => {
+    WS.send(JSON.stringify({method:'subscribe',
+      subscription:{type:'allMids'}}));
+    WS.send(JSON.stringify({method:'subscribe',
+      subscription:{type:'l2Book',coin:COIN}}));
+    WS.send(JSON.stringify({method:'subscribe',
+      subscription:{type:'trades',coin:COIN}}));
+  };
+  WS.onclose = () => setTimeout(ws, 1500);
+  WS.onmessage = ev => { var d = JSON.parse(ev.data);
+    if (d.channel==='subscriptionResult') return;
+    if (d.channel==='allMids'){
+      var px = parseFloat(d.data[COIN]);
+      if (px) setPx(px, Date.now());
+    } else if (d.channel==='l2Book'){
+      var lv = d.data.levels; drawBook(lv[0], lv[1]); drawDepth();
+    } else if (d.channel==='trades'){
+      tape(d.data);
+      (d.data||[]).forEach(t=>pushCandle(t.time*1000, parseFloat(t.px)));
+      saveC();
+    }
   };
 }
-var BOOK = {bids:[],asks:[]};
+function setPx(px, ts){
+  lastMid = px;
+  var el=$('px'), st=$('st_px');
+  el.textContent = px.toLocaleString(undefined,{maximumFractionDigits:1});
+  if (prevPx!==null && px!==prevPx){
+    st.classList.remove('hl-up','hl-dn'); void st.offsetWidth;
+    st.classList.add(px>prevPx?'hl-up':'hl-dn');
+  }
+  prevPx = px;
+  $('mid').textContent = el.textContent;
+  pushCandle(ts, px);
+  if (candles.length){
+    var hi=-1e18, lo=1e18;
+    candles.forEach(c=>{hi=Math.max(hi,c.high);lo=Math.min(lo,c.low)});
+    $('srange').textContent = fmtK(lo)+' - '+fmtK(hi);
+  }
+}
+function fmtK(n){return n>=1000 ? (n/1000).toFixed(2)+'k' : n.toFixed(1)}
+function brow(r, cls, mx){
+  return '<div class="row"><span class="'+cls+' num">'+
+    r[0].toLocaleString(undefined,{minimumFractionDigits:1})+'</span>'+
+    '<span class="num">'+r[1].toFixed(2)+'</span>'+
+    '<span class="num">'+r[2].toFixed(2)+'</span>'+
+    '<span class="bar" style="width:'+Math.min(r[2]/mx*100,100).toFixed(1)+
+    '%;background:var(--'+(cls==='b'?'up':'dn')+')"></span></div>';
+}
+function drawBook(B, A){
+  B = (B||[]).slice(0,11).map(l=>[parseFloat(l[0]),parseFloat(l[1])]);
+  A = (A||[]).slice(0,11).map(l=>[parseFloat(l[0]),parseFloat(l[1])]);
+  BOOK.bids=B; BOOK.asks=A;
+  var ab=0, rowsB=[]; B.forEach(l=>{ab+=l[1]; rowsB.push([l[0],l[1],ab])});
+  var aa=0, rowsA=[]; A.forEach(l=>{aa+=l[1]; rowsA.push([l[0],l[1],aa])});
+  var mx = Math.max(ab, aa, 1e-9);
+  $('bids').innerHTML = rowsB.map(r=>brow(r,'b',mx)).join('');
+  $('asks').innerHTML = rowsA.slice().reverse().map(r=>brow(r,'a',mx)).join('');
+  if (B.length && A.length){
+    var mid = (B[0][0]+A[0][0])/2;
+    $('spr').textContent = ((A[0][0]-B[0][0])/mid*1e4).toFixed(1)+' bps';
+  }
+}
+function tape(ts){
+  var rows = (ts||[]).slice(-14).reverse();
+  $('tape').innerHTML = '<tr><th>price</th><th>size</th><th>side</th></tr>' +
+    rows.map(t=>{var p=parseFloat(t.px), s=parseFloat(t.sz), buy=t.side==='B';
+      return '<tr><td class="'+(buy?'b':'a')+' num">'+
+        p.toLocaleString(undefined,{minimumFractionDigits:1})+'</td>'+
+        '<td class="num">'+s.toFixed(2)+'</td><td class="'+(buy?'b':'a')+'">'+
+        (buy?'BUY':'SELL')+'</td></tr>';}).join('');
+}
 function drawDepth(){
   var cv=$('depthcv'); if(cv.style.display==='none')return;
   var w=cv.clientWidth||900; if(Math.abs(cv.width-w)>1)cv.width=w;
-  if(cv.height!==380)cv.height=380;
+  if(cv.height!==400)cv.height=400;
   var ctx=cv.getContext('2d'),W=cv.width,H=cv.height;
   ctx.clearRect(0,0,W,H);
   var B=BOOK.bids,A=BOOK.asks;
