@@ -217,6 +217,12 @@ tbody tr:hover td,tr:hover td{background:rgba(255,255,255,.025)}
 <nav>
   <div class="brand"><div class="mk">HL</div><span class="wm">my-hl</span>
     <span class="bd">TESTNET</span></div>
+  <select id="coinSel" style="background:var(--p2);border:1px solid var(--ln);
+          color:var(--acc);border-radius:6px;padding:5px 8px;font-size:12px;
+          font-weight:bold;margin-right:8px">
+    <option>BTC</option><option>ETH</option><option>SOL</option>
+    <option>XRP</option><option>DOGE</option><option>HYPE</option>
+  </select>
   <a class="on" data-p="trade">Trade</a>
   <a data-p="spot">Spot</a>
   <a data-p="vaults">Vaults</a>
@@ -492,7 +498,14 @@ function backfill(){
     rebuildCandles(); saveC();
   });
 }
-var COIN='BTC', WS=null, prevPx=null, lastTradeTs=0, TF=60000, RAW=[],
+var COIN = localStorage.getItem('myhl_coin') || 'BTC';
+document.getElementById('coinSel').value = COIN;
+document.getElementById('coinSel').onchange = function(){
+  COIN = this.value;
+  localStorage.setItem('myhl_coin', COIN);
+  candles.length = 0; RAW.length = 0; prevPx = null; BOOK = {bids:[],asks:[]};
+  if (WS) WS.close();
+  refresh(); };, WS=null, prevPx=null, lastTradeTs=0, TF=60000, RAW=[],
     SZD=2, BOOK={bids:[],asks:[]};
 function ws(){
   WS = new WebSocket((location.protocol==='https:'?'wss://':'ws://')+

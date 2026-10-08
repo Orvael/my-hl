@@ -37,6 +37,17 @@ SEED_MIDS = {"BTC": 82_000, "ETH": 3_150, "SOL": 148, "XRP": 2.4,
              "DOGE": 0.16, "HYPE": 28}
 
 
+def q5(px):
+    """Quantize an S-scaled int price to the 5-sig-fig tick (specs/05).
+    Whole-dollar floors trash fractional mids (DOGE 0.16, XRP 2.4)."""
+    import math
+    usd = px / S
+    if usd <= 0:
+        return 1
+    q = 10 ** (int(math.floor(math.log10(usd))) - 4) * S
+    return max(1, (px // q) * q)
+
+
 def main():
     chain = Blockchain(ASSETS, {"v1": 40, "v2": 30, "v3": 30})
     from hl.spot import SpotStore
@@ -127,8 +138,8 @@ def main():
             if rng.random() < 0.55:
                 side = rng.random() < (0.5 + drift[coin])
                 sz = rng.randint(2, 20) * S
-                px = max(S, (mid * 1009 // 1000) // S * S) if side else \
-                    max(S, (mid * 991 // 1000) // S * S)
+                px = max(100, (mid * 1009 // 1000) // 100 * 100) if side else \
+                    max(100, (mid * 991 // 1000) // 100 * 100)
                 bot("sim_bot", {"type": "order", "orders": [
                     {"coin": coin, "is_buy": bool(side), "limit_px": px,
                      "sz": sz, "tif": "IOC"}]})
@@ -150,15 +161,15 @@ def main():
                         bot("lp_bot", {"type": "cancel", "coin": coin,
                                        "oid": oid})
                 m2 = bb.mid() or mids[coin]
-                half = max(S, m2 // 200)  # 0.05% base spread, $1 floor
+                half = max(q5(S // 100), m2 // 200)  # >=1 tick spread
                 # momentum migrates the band by a FRACTION of the mid
                 # (absolute dollars were 46% of SOL's price, 2.4x HYPE's)
                 sk = m2 * int(drift[coin] * 100) // 40_000
                 for i in range(3):
                     for is_buy in (True, False):
                         base = m2 + sk * 2
-                        px_off = max(S, (base + (half + i * 5 * S) *
-                                    (1 if not is_buy else -1)) // S * S)
+                        px_off = max(1, q5(base + (half + i * 5 * S) *
+                                    (1 if not is_buy else -1)))
                         bot("lp_bot", {"type": "order", "orders": [
                             {"coin": coin, "is_buy": is_buy,
                              "limit_px": px_off, "sz": 50 * S,
