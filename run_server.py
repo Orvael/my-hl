@@ -120,16 +120,18 @@ def main():
             if rng.random() < 0.55:
                 side = rng.random() < (0.5 + drift[coin])
                 sz = rng.randint(2, 20) * S
-                px = (mid * 1009 // 1000) // S * S if side else \
-                    (mid * 991 // 1000) // S * S
+                px = max(S, (mid * 1009 // 1000) // S * S) if side else \
+                    max(S, (mid * 991 // 1000) // S * S)
                 bot("sim_bot", {"type": "order", "orders": [
                     {"coin": coin, "is_buy": bool(side), "limit_px": px,
                      "sz": sz, "tif": "IOC"}]})
-                # oracle follows the market (validators publish prices)
+                # oracle follows the market but anchors to the seed mid:
+                # pure relative steps compound unbounded on small mids
                 if tick % 3 == 0:
-                    new_oracle = mid + (mid // 400) * (
-                        1 if drift[coin] > 0.05 else
-                        (-1 if drift[coin] < -0.05 else 0))
+                    pull = (SEED_MIDS[coin] * S - mid) // 64
+                    d = 1 if drift[coin] > 0.05 else \
+                        (-1 if drift[coin] < -0.05 else 0)
+                    new_oracle = mid + pull + (mid // 400) * d
                     bot("oracle_feed", {"type": "oracle", "coin": coin,
                                         "px": new_oracle})
         # lp re-quotes every 1s around each moving mid (via API)
@@ -141,13 +143,15 @@ def main():
                         bot("lp_bot", {"type": "cancel", "coin": coin,
                                        "oid": oid})
                 m2 = bb.mid() or mids[coin]
-                half = m2 // 200  # 0.05% base spread
-                sk = int(drift[coin] * 100)
+                half = max(S, m2 // 200)  # 0.05% base spread, $1 floor
+                # momentum migrates the band by a FRACTION of the mid
+                # (absolute dollars were 46% of SOL's price, 2.4x HYPE's)
+                sk = m2 * int(drift[coin] * 100) // 40_000
                 for i in range(3):
                     for is_buy in (True, False):
-                        base = m2 + sk * 2 * S
-                        px_off = (base + (half + i * 5 * S) *
-                                  (1 if not is_buy else -1)) // S * S
+                        base = m2 + sk * 2
+                        px_off = max(S, (base + (half + i * 5 * S) *
+                                    (1 if not is_buy else -1)) // S * S)
                         bot("lp_bot", {"type": "order", "orders": [
                             {"coin": coin, "is_buy": is_buy,
                              "limit_px": px_off, "sz": 50 * S,

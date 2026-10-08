@@ -248,16 +248,16 @@ tbody tr:hover td,tr:hover td{background:rgba(255,255,255,.025)}
     <div class="stat" id="st_px"><span>Mark</span><b id="px" class="num">—</b></div>
     <div class="stat" id="st_fund"><span>Funding / 8h</span><b id="fund" class="num">0.01%</b></div>
     <div class="stat"><span>Open Interest</span><b id="oi" class="num">—</b></div>
-    <div class="stat"><span>Session range</span><b id="srange" class="num">—</b></div>
+    <div class="stat"><span>Volume (recent)</span><b id="vol24" class="num">—</b></div>
   </div>
   <div class="grid3">
-    <div class="panel"><h4>Order book <span class="ht">BTC-USDC</span></h4>
+    <div class="panel"><h4>Order book <span class="ht" id="bhead">BTC-USDC</span></h4>
       <div class="bcols"><span>Price</span><span>Size</span><span>Total</span></div>
       <div id="asks"></div>
       <div class="mid"><span id="mid">—</span><span class="sp num" id="spr"></span></div>
       <div id="bids"></div></div>
     <div class="panel">
-      <h4>BTC-USDC <span class="ht">1m · candles</span></h4>
+      <h4><span id="chead">BTC-USDC</span> <span class="ht" id="csub">1m · candles · range —</span></h4>
       <div class="ctabs" id="ctabs"></div>
       <div id="chart" style="height:400px"></div>
       <canvas id="depthcv" style="display:none;height:400px"></canvas>
@@ -401,6 +401,8 @@ tbody tr:hover td,tr:hover td{background:rgba(255,255,255,.025)}
 var ME = localStorage.getItem('myhl_user') || null;
 var lastMid = null, candles = [], chart = null, series = null;
 var $ = id => document.getElementById(id);
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function toast(m,cls){var c=$('toasts'),d=document.createElement('div');
   d.className='tst '+(cls||'info');d.textContent=m;c.appendChild(d);
   while(c.children.length>4)c.removeChild(c.firstChild);
@@ -437,7 +439,8 @@ function initChart(){
     borderVisible:false,wickUpColor:'#0ecb81',wickDownColor:'#f6465d'});
 }
 function pushCandle(t, px){
-  var m = Math.floor(t/60000)*60000;
+  RAW.push([t, px]); if (RAW.length>3600) RAW.shift();
+  var m = Math.floor(t/TF)*TF;
   var last = candles[candles.length-1];
   if (last && last.time === m){
     last.close=px; last.high=Math.max(last.high,px);
@@ -450,30 +453,47 @@ function pushCandle(t, px){
     saveC();
   }
 }
+function agg(arr){
+  var out=[], map={};
+  for (var i=0;i<arr.length;i++){
+    var m=Math.floor(arr[i][0]/TF)*TF, p=arr[i][1], c=map[m];
+    if(!c){ c={time:m,open:p,high:p,low:p,close:p}; map[m]=c; out.push(c); }
+    else { if(p>c.high)c.high=p; if(p<c.low)c.low=p; c.close=p; }
+  }
+  return out.slice(-420);
+}
+function rebuildCandles(){
+  candles = agg(RAW);
+  if (series) series.setData(candles);
+}
 var saveT=0;
 function saveC(){ clearTimeout(saveT); saveT=setTimeout(()=>{
-  try{localStorage.setItem('myhl_candles',
-    JSON.stringify(candles.slice(-400)))}catch(e){}},800)}
+  try{localStorage.setItem('myhl_raw_'+COIN,
+    JSON.stringify(RAW.slice(-3600)))}catch(e){}},800)}
 function backfill(){
-  var map={};
-  try{(JSON.parse(localStorage.getItem('myhl_candles')||'[]'))
-    .forEach(c=>{map[c.time]=c;});}catch(e){}
+  RAW=[];
+  try{(JSON.parse(localStorage.getItem('myhl_raw_'+COIN)||'[]'))
+    .forEach(p=>RAW.push(p));}catch(e){}
   api('/events?since=0',null,r=>{
-    ((r&&r.events)||[]).forEach(ev=>{
-      if (ev.t!=='fill'||ev.coin!==COIN) return;
-      var m = Math.floor(ev.ts*1000/60000)*60000, px = ev.px/1e8;
-      var c = map[m];
-      if (!c){ c={time:m,open:px,high:px,low:px,close:px}; map[m]=c; }
-      c.high=Math.max(c.high,px); c.low=Math.min(c.low,px); c.close=px;
-    });
-    candles = Object.keys(map).map(k=>map[k])
-      .sort((a,b)=>a.time-b.time).slice(-400);
-    lastTradeTs = candles.length ? candles[candles.length-1].time : 0;
-    if (series && candles.length) series.setData(candles);
-    saveC();
+    var evs=((r&&r.events)||[]).filter(ev=>ev.t==='fill'&&ev.coin===COIN);
+    if (evs.length){
+      var mn=1e18, mx=0;
+      evs.forEach(ev=>{var q=ev.px/1e8; if(q<mn)mn=q; if(q>mx)mx=q;});
+      RAW=RAW.filter(p=>p[1]>mn*0.9&&p[1]<mx*1.1);  /* inside this run's range */
+    }
+    evs.forEach(ev=>RAW.push([ev.ts*1000, ev.px/1e8]));
+    if (evs.length){
+      var newest=evs[evs.length-1].ts*1000;
+      RAW=RAW.filter(p=>p[0]<=newest+120000);   /* drop future-stamped junk */
+    }
+    RAW.sort((a,b)=>a[0]-b[0]);
+    if (RAW.length>3600) RAW=RAW.slice(-3600);
+    lastTradeTs = RAW.length ? RAW[RAW.length-1][0] : 0;
+    rebuildCandles(); saveC();
   });
 }
-var COIN='BTC', WS=null, prevPx=null, lastTradeTs=0, BOOK={bids:[],asks:[]};
+var COIN='BTC', WS=null, prevPx=null, lastTradeTs=0, TF=60000, RAW=[],
+    SZD=2, BOOK={bids:[],asks:[]};
 function ws(){
   WS = new WebSocket((location.protocol==='https:'?'wss://':'ws://')+
     location.host+'/ws');
@@ -488,6 +508,8 @@ function ws(){
   WS.onclose = () => setTimeout(ws, 1500);
   WS.onmessage = ev => { var d = JSON.parse(ev.data);
     if (d.channel==='subscriptionResult') return;
+    if (d.coin && d.coin!==COIN) return;          /* stale-coin guard */
+    if (d.data && d.data.coin && d.data.coin!==COIN) return;
     if (d.channel==='allMids'){
       var px = parseFloat(d.data[COIN]);
       if (px) setPx(px, Date.now());
@@ -496,6 +518,7 @@ function ws(){
     } else if (d.channel==='trades'){
       tape(d.data);
       (d.data||[]).forEach(t=>{
+        if (t.coin && t.coin!==COIN) return;    /* per-item coin guard */
         var tms=t.time*1000;
         if (tms>=lastTradeTs){ lastTradeTs=tms;
           pushCandle(tms, parseFloat(t.px)); }
@@ -518,7 +541,7 @@ function setPx(px, ts){
   if (candles.length){
     var hi=-1e18, lo=1e18;
     candles.forEach(c=>{hi=Math.max(hi,c.high);lo=Math.min(lo,c.low)});
-    $('srange').textContent = fmtK(lo)+' - '+fmtK(hi);
+    $('csub').textContent = (TF/60000)+'m · candles · range '+fmtK(lo)+' - '+fmtK(hi);
   }
 }
 function fmtK(n){return n>=1000 ? (n/1000).toFixed(2)+'k' : n.toFixed(1)}
@@ -545,7 +568,7 @@ function drawBook(B, A){
   }
 }
 function tape(ts){
-  var rows = (ts||[]).slice(-14).reverse();
+  var rows = (ts||[]).filter(t=>!t.coin||t.coin===COIN).slice(-14).reverse();
   $('tape').innerHTML = '<tr><th>price</th><th>size</th><th>side</th></tr>' +
     rows.map(t=>{var p=parseFloat(t.px), s=parseFloat(t.sz), buy=t.side==='B';
       return '<tr><td class="'+(buy?'b':'a')+' num">'+
@@ -591,11 +614,24 @@ function drawDepth(){
 ['Candles','Depth'].forEach((l,i)=>{
   var d=document.createElement('div'); if(!i)d.className='on'; d.textContent=l;
   d.onclick=()=>{
-    $('ctabs').querySelectorAll('div').forEach(x=>x.classList.remove('on'));
+    var ts=$('ctabs').children;
+    for (var k=0;k<2&&k<ts.length;k++) ts[k].classList.remove('on');
     d.classList.add('on');
     $('chart').style.display=i?'none':'block';
     $('depthcv').style.display=i?'block':'none';
     if(i)drawDepth();
+  };
+  $('ctabs').appendChild(d); });
+['1m','5m','15m'].forEach((l,i)=>{
+  var d=document.createElement('div'); if(!i)d.className='on'; d.textContent=l;
+  d.style.borderLeft='1px solid var(--ln2)';
+  d.onclick=()=>{
+    TF=[60000,300000,900000][i];
+    var ts=d.parentNode.children;
+    for (var k=2;k<ts.length;k++) ts[k].classList.remove('on');
+    d.classList.add('on');
+    $('csub').textContent=(TF/60000)+'m · candles';
+    rebuildCandles();
   };
   $('ctabs').appendChild(d); });
 function toggleMkt(ev){ ev.stopPropagation();
@@ -617,13 +653,20 @@ function toggleMkt(ev){ ev.stopPropagation();
 }
 function pickMkt(c){
   $('mktmenu').classList.remove('open');
-  if (c!==COIN){
-    COIN=c; $('mkt_sym').textContent=c+'-USD';
-    candles=[]; BOOK.bids=[]; BOOK.asks=[];
-    if (series) series.setData([]);
-    if (WS) WS.close();
-    backfill();
-  }
+  if (c===COIN) return;
+  COIN=c;
+  $('mkt_sym').textContent=c+'-USD';
+  $('bhead').textContent=c+'-USDC';
+  $('chead').textContent=c+'-USDC';
+  $('sz_in').placeholder='Size ('+c+')';
+  candles=[]; RAW=[]; BOOK.bids=[]; BOOK.asks=[];
+  if (series) series.setData([]);
+  api('/info',{type:'meta'},mt=>{
+    (mt.universe||[]).forEach(u=>{ if(u.name===c) SZD=u.szDecimals||2; });});
+  api('/info',{type:'l2Book',coin:c},b=>{
+    if (b&&b.levels) drawBook(b.levels[0], b.levels[1]);});
+  if (WS) WS.close();   /* reconnect resubscribes with the new COIN */
+  backfill();
 }
 document.addEventListener('click',e=>{
   var m=$('mktmenu');
@@ -689,7 +732,7 @@ function send(is_buy){
     var px = Math.round(parseFloat($('px_in').value||'0')*1e8);
     var sz = Math.round(parseFloat($('sz_in').value||'0')*1e8);
     if (!px||!sz) return toast('price and size required');
-    api('/exchange',{action:{type:'order',orders:[{coin:'BTC',is_buy:!!is_buy,
+    api('/exchange',{action:{type:'order',orders:[{coin:COIN,is_buy:!!is_buy,
       limit_px:px,sz:sz,tif:$('tif').value}]},nonce:Date.now(),
       signature:{signer:ME}},r=>{
       if (r.status==='ok'){ var st=r.response.statuses[0].status;
@@ -702,6 +745,14 @@ function tab(el,id){document.querySelectorAll('.tabs div').forEach(d=>d.classLis
   el.classList.add('on');['pos','oo','hist'].forEach(k=>$(k).style.display=k===id?'block':'none');
   refresh();}
 function refresh(){
+  api('/info',{type:'assetCtxs'},cx=>{
+    var c=cx&&cx[COIN]; if(!c) return;
+    var f=parseFloat(c.funding8h);
+    $('fund').textContent=(f>=0?'+':'')+(f*100).toFixed(4)+'%';
+    $('oi').textContent=c.openInterest+' '+COIN;
+    $('vol24').textContent='$'+parseFloat(c.dayNtlVlm)
+      .toLocaleString(undefined,{maximumFractionDigits:0});
+  });
   if (!ME) return;
   api('/info',{type:'userState',user:ME},s=>{
     if (!s.marginSummary) return;
@@ -725,7 +776,7 @@ function refresh(){
       '</td><td class="'+(parseFloat(f.closedPnl)>=0?'b':'a')+'">'+f.closedPnl+'</td></tr>';});
     $('hist').innerHTML=t+'</table>';});
 }
-function cancel(oid){ api('/exchange',{action:{type:'cancel',coin:'BTC',oid:oid},
+function cancel(oid){ api('/exchange',{action:{type:'cancel',coin:COIN,oid:oid},
   nonce:Date.now(),signature:{signer:ME}},r=>refresh()); }
 function ssend(is_buy){
   requireAuth(()=>{
@@ -759,7 +810,7 @@ function refreshSpot(){
 function vlist(){
   api('/info',{type:'vaults'},vs=>{
     var t='<tr><th>vault</th><th>leader</th><th>equity</th><th>share px</th></tr>';
-    (vs||[]).forEach(v=>{t+='<tr><td>'+v.name+'</td><td>'+v.leader+'</td><td class="b">$'+
+    (vs||[]).forEach(v=>{t+='<tr><td>'+esc(v.name)+'</td><td>'+esc(v.leader)+'</td><td class="b">$'+
       v.equity+'</td><td>'+v.sharePx+'</td></tr>';});
     $('v_list').innerHTML=t+'</table>';});
 }
@@ -796,14 +847,14 @@ function refreshPage(){
     (rows||[]).forEach(r=>{
       var rk = r.rank<=3 ? '<span class="medal m'+r.rank+'">'+r.rank+'</span>'
                          : '<span class="mut">'+r.rank+'</span>';
-      t+='<tr><td>'+rk+'</td><td>'+r.user+'</td><td class="b num">$'+
+      t+='<tr><td>'+rk+'</td><td>'+esc(r.user)+'</td><td class="b num">$'+
         r.accountValue+'</td><td class="num">$'+r.volume+'</td></tr>';});
     $('board').innerHTML='<table>'+t+'</table>';});
   if (p==='p-staking') api('/info',{type:'staking',user:ME},s=>{
     if (!s) return;
     var t='<tr><th>validator</th><th>stake</th><th>commission</th><th>status</th></tr>';
     (s.validators||[]).forEach(v=>{
-      t+='<tr><td>'+v.validator+'</td><td class="num">'+v.totalStake+
+      t+='<tr><td>'+esc(v.validator)+'</td><td class="num">'+v.totalStake+
         '</td><td class="num">'+v.commission+'</td><td>'+
         (v.jailed?'<span class="pill bad">jailed</span>'
                  :'<span class="pill ok">active</span>')+'</td></tr>';});

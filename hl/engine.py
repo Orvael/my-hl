@@ -560,7 +560,7 @@ class Engine:
                 self.deposit(a["user"], a["usd"])
             elif t == "usdSend":
                 src = self.ch.accounts.get(a["user"])
-                if src is not None and src.usd >= a["amount"]:
+                if a["amount"] > 0 and src is not None and src.usd >= a["amount"]:
                     src.usd -= a["amount"]
                     self.ch.acc(a["destination"]).usd += a["amount"]
             elif t == "pmMode":

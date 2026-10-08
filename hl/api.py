@@ -118,11 +118,11 @@ class ApiState:
                     "oraclePx": fmt_px(oracle),
                     "funding8h": fmt_px(fund or 0),
                     "openInterest": fmt_px(oi),
-                    "dayNtlVlm": str(vlm / 1e16),
+                    "dayNtlVlm": str(round(vlm / 1e16, 2)),
                 }
             return out
         if t == "l2Book":
-            coin = req["coin"]
+            coin = req.get("coin")
             b = self.engine.books.get(coin)
             if b is None:
                 return None
@@ -136,11 +136,11 @@ class ApiState:
             return {"coin": coin,
                     "levels": [lvl(b.bids, True), lvl(b.asks, False)]}
         if t == "userState":
-            return self._user_state(req["user"])
+            return self._user_state(req.get("user"))
         if t == "openOrders":
-            return self._open_orders(req["user"])
+            return self._open_orders(req.get("user"))
         if t == "userFills":
-            return self._user_fills(req["user"])
+            return self._user_fills(req.get("user"))
         if t == "leaderboard":
             rows = []
             for u, a in self.engine.ch.accounts.items():
@@ -370,12 +370,20 @@ class ApiState:
             return result
 
     def _dispatch(self, user, action, leader=None, eng=None):
+        try:
+            return self._dispatch_inner(user, action, leader, eng)
+        except Exception:
+            return {"status": "err", "response": "bad_request"}
+
+    def _dispatch_inner(self, user, action, leader=None, eng=None):
         e = self.engine
         t = action.get("type")
         if t == "order":
             builder = action.get("builder")
             results = []
             for o in action.get("orders", []):
+                if int(o.get("limit_px", 0)) <= 0 or int(o.get("sz", 0)) <= 0:
+                    return {"status": "err", "response": "px_sz_must_be_positive"}
                 if eng is not None:
                     eng.append({"t": "place", "user": user, "coin": o["coin"],
                                 "is_buy": o["is_buy"], "px": int(o["limit_px"]),
@@ -404,6 +412,13 @@ class ApiState:
                                 "oid": e.next_oid - 1 if st else None})
             return {"status": "ok", "response": {"statuses": results}}
         if t == "cancel":
+        # ownership: a user may only cancel their own resting order
+            if action.get("coin") not in e.books:
+                return {"status": "err", "response": "no_coin"}
+            o = e.books.get(action["coin"], None) and \
+                e.books[action["coin"]].orders.get(action["oid"])
+            if o is not None and o.user != user:
+                return {"status": "err", "response": "not_your_order"}
             ok = e.books[action["coin"]].cancel(action["oid"])
             if ok and eng is not None:
                 eng.append({"t": "cancel", "coin": action["coin"],
@@ -444,6 +459,8 @@ class ApiState:
             self.faucet_given.add(user)
             return {"status": "ok", "response": "fauceted_10000_usdc"}
         if t == "delegate" and self.staking is not None:
+            if int(action.get("amount", 0)) <= 0:
+                return {"status": "err", "response": "amount_must_be_positive"}
             ok = self.staking.delegate(user, action["validator"],
                                        int(action["amount"]))
             return {"status": "ok" if ok else "err",
@@ -508,6 +525,8 @@ class ApiState:
             ok, why = self.engine.refer(action["code_owner"], user)
             return {"status": "ok" if ok else "err", "response": why}
         if t == "spotOrder" and self.spot is not None:
+            if int(action.get("px", 0)) <= 0 or int(action.get("sz", 0)) <= 0:
+                return {"status": "err", "response": "px_sz_must_be_positive"}
             st, fills = self.spot.place_spot(
                 user, int(action["base"]), bool(action["is_buy"]),
                 int(action["px"]), int(action["sz"]),
@@ -522,7 +541,10 @@ class ApiState:
                                    "ts": self.engine.block_ts})
             return {"status": "ok", "response": {"status": st}}
         if t == "faucetSpot" and self.spot is not None:
-            self.spot._add(user, 0, 10_000 * 10 ** 8)   # spot USDC
+            if user in self.faucet_given:
+                return {"status": "err", "response": "already_fauceted"}
+            self.spot._add(user, 0, 10_000 * 10 ** 8)
+            self.faucet_given.add(user)
             return {"status": "ok", "response": "spot_usdc_10000"}
         if t == "pmMode":
             if eng is not None:
@@ -535,6 +557,8 @@ class ApiState:
                                               av)
             return {"status": "ok" if ok else "err", "response": why}
         if t == "pmSupply":
+            if int(action.get("amount", 0)) <= 0:
+                return {"status": "err", "response": "amount_must_be_positive"}
             if eng is not None:
                 eng.append({"t": "pmSupply", "user": user,
                             "asset": action["asset"],
@@ -543,6 +567,8 @@ class ApiState:
                                             int(action["amount"]))
             return {"status": "ok" if ok else "err", "response": why}
         if t == "pmBorrow":
+            if int(action.get("amount", 0)) <= 0:
+                return {"status": "err", "response": "amount_must_be_positive"}
             if eng is not None:
                 eng.append({"t": "pmBorrow", "user": user,
                             "asset": action["asset"],
@@ -567,6 +593,8 @@ class ApiState:
             self.subaccounts.setdefault(user, []).append(sub)
             return {"status": "ok", "response": sub}
         if t == "usdSend":
+            if int(action.get("amount", 0)) <= 0:
+                return {"status": "err", "response": "amount_must_be_positive"}
             if eng is not None:
                 eng.append({"t": "usdSend", "user": user,
                             "destination": action["destination"],
@@ -771,7 +799,10 @@ def make_server(api_state, chain=None, host="127.0.0.1", port=0):
             if self.path.startswith("/block/"):
                 if chain is None:
                     return self._json(404, {"error": "no_chain"})
-                h = int(self.path.split("/block/")[1].split("?")[0])
+                try:
+                    h = int(self.path.split("/block/")[1].split("?")[0])
+                except ValueError:
+                    return self._json(400, {"error": "bad_block"})
                 return self._json(200, chain.to_json(h))
             if self.path.startswith("/events"):
                 since = 0
@@ -789,10 +820,16 @@ def make_server(api_state, chain=None, host="127.0.0.1", port=0):
             except Exception:
                 return self._json(400, {"error": "bad_json"})
             if self.path == "/info":
-                with api_state.lock:
-                    return self._json(200, api_state.info(req))
+                try:
+                    with api_state.lock:
+                        return self._json(200, api_state.info(req))
+                except Exception:
+                    return self._json(400, {"error": "bad_request"})
             if self.path == "/exchange":
-                return self._json(200, api_state.exchange(req))
+                try:
+                    return self._json(200, api_state.exchange(req))
+                except Exception:
+                    return self._json(400, {"error": "bad_request"})
             return self._json(404, {"error": "not_found"})
 
     srv = ThreadingHTTPServer((host, port), Handler)
