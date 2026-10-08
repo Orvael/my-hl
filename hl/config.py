@@ -21,6 +21,7 @@ PREMIUM_SAMPLE_S = 5
 DEFAULT_ASSET = {
     "max_leverage": 20,
     "sz_decimals": 2,
-    # per-asset impact notional NOT verified (contract-specifications page not fetched).
-    "impact_notional_usd": 200_000 * SCALE,  # UNVERIFIED default
+    # Contract specs (verified specs/07): 20k USDC for BTC/ETH, 6k for others.
+    "impact_notional_usd": 6_000 * SCALE,
 }
+IMPACT_NOTIONAL_LARGE = 20_000 * SCALE  # BTC/ETH per contract specs

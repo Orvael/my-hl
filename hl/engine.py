@@ -3,6 +3,7 @@ from .config import SCALE, TAKER_FEE, MAKER_FEE
 from .num import qdiv, notional
 from .book import OrderBook, STATUS_FILLED, STATUS_RESTED, STATUS_CANCELED
 from .clearing import ClearingHouse, VAULT_FEES, VAULT_HLP, VAULT_ADL
+from .oracle import MarkEngine
 from .types import Order, TIFS
 
 LIQ = "LIQ"  # pseudo-user for forced closes
@@ -18,10 +19,30 @@ class Engine:
         self.last_funding_ts = 0
         self.vault_names = vault_names
         self.oracles = {}
+        self.ext = {}
+        self.mark_engine = MarkEngine()
+        self.marks = {}
 
     def mark(self, coin):
-        """v1 simplification: mark = oracle (robust index is v2)."""
+        """specs/06 robust mark; falls back to oracle if never computed."""
+        m = self.marks.get(coin)
+        if m is not None:
+            return m
         return self.oracles.get(coin)
+
+    def update_marks(self):
+        """specs/06: refresh robust marks from book + externals (end of block)."""
+        for coin in sorted(self.assets):
+            oracle = self.oracles.get(coin)
+            if oracle is None:
+                continue
+            b = self.books[coin]
+            ext = self.ext.get(coin)
+            m = self.mark_engine.update(
+                coin, oracle, b.mid(), b.best_bid(), b.best_ask(),
+                b.last_trade, ext, self.block_ts)
+            if m is not None:
+                self.marks[coin] = m
 
     def execute_market(self, user, coin, is_buy, sz, px_bound, tif="IOC"):
         """Aggressive order -> book sweep -> clearing, fees on every fill."""
@@ -246,6 +267,8 @@ class Engine:
                     events.append({"t": "reject", "op": "withdraw", "user": a["user"]})
             elif t == "oracle":
                 self.set_oracle(a["coin"], a["px"])
+            elif t == "ext_px":
+                self.ext.setdefault(a["coin"], {})[a["src"]] = a["px"]
             elif t == "place":
                 st, fills = self.place(a["user"], a["coin"], a["is_buy"],
                                        a["px"], a["sz"], a.get("tif", "GTC"),
@@ -258,7 +281,8 @@ class Engine:
                 self.books[a["coin"]].cancel(a["oid"])
             else:
                 events.append({"t": "reject", "op": str(t)})
+        self.update_marks()
         events.extend(self.settle_funding_if_due())
-        marks = dict(self.oracles)
+        marks = {c: self.mark(c) for c in self.assets}
         events.extend(self.liq_pass(marks))
         return events

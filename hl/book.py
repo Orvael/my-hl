@@ -8,13 +8,14 @@ STATUS_CANCELED = "canceled"
 
 
 class OrderBook:
-    __slots__ = ("coin", "bids", "asks", "orders")
+    __slots__ = ("coin", "bids", "asks", "orders", "last_trade")
 
     def __init__(self, coin):
         self.coin = coin
         self.bids = {}
         self.asks = {}
         self.orders = {}
+        self.last_trade = None
 
     def best_bid(self):
         return max(self.bids) if self.bids else None
@@ -53,6 +54,7 @@ class OrderBook:
             if not self._crossed(taker, px):
                 break
             fill_sz = min(taker.sz_rem, maker.sz_rem)
+            self.last_trade = maker.px
             fills.append({
                 "maker_oid": maker.oid, "maker_user": maker.user,
                 "px": maker.px, "sz": fill_sz,
