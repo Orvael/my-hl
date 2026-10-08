@@ -37,7 +37,9 @@ def main():
     staking.register("v1", 40_000 * S, 3)
     staking.register("v2", 30_000 * S, 5)
     staking.register("v3", 30_000 * S, 5)
-    api = ApiState(chain.sim.nodes[chain.sim._leader()].engine, spot=spot,
+    # LEADER = its own engine (applies each action exactly once at dispatch).
+    # Chain nodes are pure replicas that re-apply blocks in apply_block.
+    api = ApiState(Engine(ASSETS), spot=spot,
                    staking=staking, vault=vault, vault_factory=vfactory)
     e = api.engine
     e.set_oracle("BTC", 82_000 * S)
@@ -56,8 +58,8 @@ def main():
     # genesis block: oracle + liquidity seed (each order under the $5M cap)
     seed = [{"t": "oracle", "coin": "BTC", "px": 82_000 * S},
             {"t": "deposit", "user": "lp_bot", "usd": 50_000_000 * S}]
+    e.apply_block(0, seed)
     chain.submit(0, seed)
-    e.deposit("lp_bot", 50_000_000 * S)
     for lvl in range(6):
         for side_px, is_buy in ((81_900 - lvl * 10, True),
                                 (82_100 + lvl * 10, False)):
@@ -78,10 +80,9 @@ def main():
     api.rate_limit = 100_000
     seed2 = [{"t": "deposit", "user": "sim_bot", "usd": 20_000_000 * S},
              {"t": "deposit", "user": "sim_base", "usd": 1_000_000 * S}]
-    chain.submit(int(time.time()), seed2)
     for a in seed2:
         e.apply_block(int(time.time()), [a])
-    e.ch.acc("sim_base").positions["BTC"] = _mk_pos("BTC", 400 * S, 82_000 * S)
+    chain.submit(int(time.time()), seed2)
     nonce = [1000]
 
     def bot(user, action):
@@ -112,7 +113,8 @@ def main():
             if tick % 3 == 0:
                 new_oracle = mid + (mid // 400) * (1 if drift > 0.05 else
                                                    (-1 if drift < -0.05 else 0))
-                e.set_oracle("BTC", new_oracle)
+                bot("oracle_feed", {"type": "oracle", "coin": "BTC",
+                                    "px": new_oracle})
         # lp re-quotes every 1s around the moving mid (int ticks, via API)
         if tick % 2 == 0:
             for oid in list(b.orders):
@@ -129,25 +131,42 @@ def main():
                     bot("lp_bot", {"type": "order", "orders": [
                         {"coin": "BTC", "is_buy": is_buy, "limit_px": px_off,
                          "sz": 50 * S, "tif": "ALO"}]})
-        # --- block production from live traffic ---
+        # --- block production: atomic drain + passes + submit ---
+        # The leader (api engine) applied actions at dispatch; the passes run
+        # here under the same lock and timestamp as the replicas' apply_block,
+        # and the leader hash is captured before any new order can interleave.
         if tick % 8 == 0:
             spot.hl_pass((pidx, 0), int(time.time()))
-        actions = []
         with api.lock:
+            actions = []
             if api.action_log:
-                actions = [a for _, a in api.action_log]
+                actions = [a for _, batch in api.action_log for a in batch]
                 api.action_log = []
-        if actions:
             ts = int(time.time())
+            if actions:
+                e.run_passes(ts)
+                leader_hash = state_hash(e)
+        if actions:
             r = chain.submit(ts, actions)
-            e.run_passes(ts)
             if r.get("status") == "committed":
                 checks += 1
-                if state_hash(e) == r["hash"]:
+                if leader_hash == r["state_hash"]:
                     ok += 1
                 else:
-                    print("REPLICA MISMATCH at height %d" %
-                          chain.head().header["height"], flush=True)
+                    from hl.journal import state_dict
+                    ld = state_dict(e)
+                    key = "?"
+                    for name in sorted(chain.sim.nodes):
+                        rd = state_dict(chain.sim.nodes[name].engine)
+                        if rd == ld:
+                            continue
+                        for k in ld:
+                            if ld[k] != rd.get(k):
+                                key = k
+                                break
+                        break
+                    print("MISMATCH h%d key=%s" % (
+                        chain.head().header["height"], key), flush=True)
         if tick % 10 == 0:
             print("t%d bids %d asks %d mid %.1f | blocks %d agree %d"
                   % (tick, len(b.bids), len(b.asks), mid / 1e8, checks, ok),

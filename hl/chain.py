@@ -64,8 +64,11 @@ class Blockchain:
             "state_hash": r["hash"],
         }
         self.blocks.append(Block(header, actions))
+        from .journal import state_hash as _sh
+        rep_state = _sh(self.sim.nodes[self.sim._leader()].engine)
         return {"status": "committed", "height": header["height"],
-                "hash": self.blocks[-1].hash()}
+                "hash": self.blocks[-1].hash(),
+                "state_hash": rep_state}
 
     def head(self):
         return self.blocks[-1]

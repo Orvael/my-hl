@@ -558,6 +558,21 @@ class Engine:
             t = a.get("t")
             if t == "deposit":
                 self.deposit(a["user"], a["usd"])
+            elif t == "usdSend":
+                src = self.ch.accounts.get(a["user"])
+                if src is not None and src.usd >= a["amount"]:
+                    src.usd -= a["amount"]
+                    self.ch.acc(a["destination"]).usd += a["amount"]
+            elif t == "pmMode":
+                acc = self.ch.acc(a["user"])
+                ok, _ = self.pm.set_mode(a["user"], a["on"],
+                                         self.ch.account_value(acc, dict(self.oracles)))
+            elif t == "pmSupply":
+                self.pm.supply(a["user"], a["asset"], a["amount"])
+            elif t == "pmBorrow":
+                self.pm.borrow(a["user"], a["asset"], a["amount"])
+            elif t == "pmRepay":
+                self.pm.repay(a["user"], a["asset"], a["amount"])
             elif t == "withdraw":
                 if not self.withdraw(a["user"], a["usd"]):
                     events.append({"t": "reject", "op": "withdraw", "user": a["user"]})

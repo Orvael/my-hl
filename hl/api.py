@@ -88,6 +88,39 @@ class ApiState:
                 if px is not None:
                     out[coin] = fmt_px(px)
             return out
+        if t == "assetCtxs":
+            # per-market context: mark, oracle, live premium funding,
+            # open interest (sum |szi|), recent notional volume
+            out = {}
+            for coin in sorted(self.engine.assets):
+                b = self.engine.books[coin]
+                mark = self.engine.mark(coin)
+                oracle = self.engine.oracles.get(coin)
+                px = b.mid() or b.last_trade or mark
+                oi = 0
+                for acc in self.engine.ch.accounts.values():
+                    p = acc.positions.get(coin)
+                    if p is not None and p.szi:
+                        oi += abs(p.szi)
+                vlm = 0
+                fund = None
+                for ev in self.events:
+                    if ev.get("coin") != coin:
+                        continue
+                    if ev.get("t") == "fill":
+                        vlm += ev["px"] * ev["sz"]
+                    elif ev.get("t") == "funding" and fund is None:
+                        fund = ev.get("f8")
+                if fund is None and oracle and px:
+                    fund = (px - oracle) * 8 * SCALE // oracle
+                out[coin] = {
+                    "markPx": fmt_px(mark),
+                    "oraclePx": fmt_px(oracle),
+                    "funding8h": fmt_px(fund or 0),
+                    "openInterest": fmt_px(oi),
+                    "dayNtlVlm": str(vlm / 1e16),
+                }
+            return out
         if t == "l2Book":
             coin = req["coin"]
             b = self.engine.books.get(coin)
@@ -328,18 +361,26 @@ class ApiState:
             if not self.rate_check(user):
                 return {"status": "err", "response": "rate_limit"}
             action = req.get("action", {})
+            eng = []
             result = self._dispatch(user, action,
-                                    leader=req.get("signature", {}).get("signer"))
-            self.action_log.append((int(time.time()), action))
+                                    leader=req.get("signature", {}).get("signer"),
+                                    eng=eng)
+            if eng:
+                self.action_log.append((int(time.time()), eng))
             return result
 
-    def _dispatch(self, user, action, leader=None):
+    def _dispatch(self, user, action, leader=None, eng=None):
         e = self.engine
         t = action.get("type")
         if t == "order":
             builder = action.get("builder")
             results = []
             for o in action.get("orders", []):
+                if eng is not None:
+                    eng.append({"t": "place", "user": user, "coin": o["coin"],
+                                "is_buy": o["is_buy"], "px": int(o["limit_px"]),
+                                "sz": int(o["sz"]), "tif": o.get("tif", "GTC"),
+                                "reduce_only": o.get("reduce_only", False)})
                 if builder:
                     e.builder = (builder["b"], int(builder["f"]))
                 else:
@@ -364,6 +405,9 @@ class ApiState:
             return {"status": "ok", "response": {"statuses": results}}
         if t == "cancel":
             ok = e.books[action["coin"]].cancel(action["oid"])
+            if ok and eng is not None:
+                eng.append({"t": "cancel", "coin": action["coin"],
+                            "oid": action["oid"]})
             return {"status": "ok" if ok else "err",
                     "response": "canceled" if ok else "unknown_oid"}
         if t == "convertToMultiSigUser":
@@ -385,6 +429,9 @@ class ApiState:
             return self._dispatch(action["target"], action.get("inner_action", {}),
                                   leader=leader)
         if t == "faucet":
+            if eng is not None:
+                eng.append({"t": "deposit", "user": user,
+                            "usd": 10_000 * 10 ** 8})
             """Testnet money: once per account (specs/14)."""
             if not hasattr(self, "faucet_given"):
                 self.faucet_given = set()
@@ -478,6 +525,9 @@ class ApiState:
             self.spot._add(user, 0, 10_000 * 10 ** 8)   # spot USDC
             return {"status": "ok", "response": "spot_usdc_10000"}
         if t == "pmMode":
+            if eng is not None:
+                eng.append({"t": "pmMode", "user": user,
+                            "on": bool(action.get("on"))})
             acc = self.engine.ch.acc(user)
             marks = {c: self.engine.mark(c) for c in self.engine.assets}
             av = self.engine.ch.account_value(acc, marks)
@@ -485,14 +535,26 @@ class ApiState:
                                               av)
             return {"status": "ok" if ok else "err", "response": why}
         if t == "pmSupply":
+            if eng is not None:
+                eng.append({"t": "pmSupply", "user": user,
+                            "asset": action["asset"],
+                            "amount": int(action["amount"])})
             ok, why = self.engine.pm.supply(user, action["asset"],
                                             int(action["amount"]))
             return {"status": "ok" if ok else "err", "response": why}
         if t == "pmBorrow":
+            if eng is not None:
+                eng.append({"t": "pmBorrow", "user": user,
+                            "asset": action["asset"],
+                            "amount": int(action["amount"])})
             ok, why = self.engine.pm.borrow(user, action["asset"],
                                             int(action["amount"]))
             return {"status": "ok" if ok else "err", "response": why}
         if t == "pmRepay":
+            if eng is not None:
+                eng.append({"t": "pmRepay", "user": user,
+                            "asset": action["asset"],
+                            "amount": int(action["amount"])})
             ok, why = self.engine.pm.repay(user, action["asset"],
                                            int(action["amount"]))
             return {"status": "ok" if ok else "err", "response": why}
@@ -505,6 +567,10 @@ class ApiState:
             self.subaccounts.setdefault(user, []).append(sub)
             return {"status": "ok", "response": sub}
         if t == "usdSend":
+            if eng is not None:
+                eng.append({"t": "usdSend", "user": user,
+                            "destination": action["destination"],
+                            "amount": int(action["amount"])})
             dst, amt = action["destination"], int(action["amount"])
             src = e.ch.accounts.get(user)
             if src is None or src.usd < amt:
@@ -636,7 +702,7 @@ def make_server(api_state, chain=None, host="127.0.0.1", port=0):
                          if ev.get("t") == "fill" and ev["coin"] == sub.get("coin")]
                     out = {}
                     for x in t:
-                        m = x["ts"] // 60000 * 60000
+                        m = x["ts"] * 1000 // 60000 * 60000
                         c = out.setdefault(m, [x["px"], x["px"], x["px"], x["px"]])
                         c[1] = max(c[1], x["px"]); c[2] = min(c[2], x["px"])
                         c[3] = x["px"]
