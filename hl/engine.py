@@ -3,7 +3,7 @@ from .config import (SCALE, TAKER_FEE, MAKER_FEE, INTEREST_8H,
                      FUNDING_CLAMP, FUNDING_CAP)
 from .num import qdiv, notional, clamp
 from .book import OrderBook, STATUS_FILLED, STATUS_RESTED, STATUS_CANCELED
-from .clearing import ClearingHouse, VAULT_FEES, VAULT_HLP, VAULT_ADL
+from .clearing import ClearingHouse, VAULT_FEES, VAULT_HLP, VAULT_ADL, PortfolioMargin
 from .oracle import MarkEngine
 from .triggers import TriggerStore, Trigger, Twap
 from .types import Order, TIFS
@@ -16,6 +16,7 @@ class Engine:
         self.assets = assets
         self.books = {c: OrderBook(c) for c in assets}
         self.ch = ClearingHouse(assets)
+        self.pm = PortfolioMargin()
         self.next_oid = 1
         self.block_ts = 0
         self.last_funding_ts = 0
@@ -544,6 +545,7 @@ class Engine:
         events.extend(self.twap_pass(marks))
         events.extend(self.trigger_pass(marks))
         events.extend(self.settle_funding_if_due())
+        self.pm.accrue_interest(ts)
         events.extend(self.liq_pass(marks))
         return events
 
@@ -601,5 +603,6 @@ class Engine:
         events.extend(self.twap_pass(marks))
         events.extend(self.trigger_pass(marks))
         events.extend(self.settle_funding_if_due())
+        self.pm.accrue_interest(ts)
         events.extend(self.liq_pass(marks))
         return events

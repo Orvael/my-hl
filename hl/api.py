@@ -164,6 +164,17 @@ class ApiState:
                                 "equity": fmt_px(eq), "sharePx": fmt_px(shp),
                                 "leaderFraction": "0%"})
             return out
+        if t == "portfolio":
+            pm = self.engine.pm
+            u = req.get("user")
+            c = pm.collateral.get(u, {})
+            b = pm.borrows.get(u, {})
+            return {"mode": pm.modes.get(u, "standard"),
+                    "collateral": {k: [v[0] / 1e8, v[2] / 1e8, v[1] / 1e6]
+                                   for k, v in c.items()},
+                    "borrows": {k: v / 1e8 for k, v in b.items()},
+                    "pools": {k: [p["supplied"] / 1e8, p["borrowed"] / 1e8]
+                              for k, p in pm.pools.items()}}
         if t == "referral":
             u = req.get("user")
             r = self.engine
@@ -466,6 +477,25 @@ class ApiState:
         if t == "faucetSpot" and self.spot is not None:
             self.spot._add(user, 0, 10_000 * 10 ** 8)   # spot USDC
             return {"status": "ok", "response": "spot_usdc_10000"}
+        if t == "pmMode":
+            acc = self.engine.ch.acc(user)
+            marks = {c: self.engine.mark(c) for c in self.engine.assets}
+            av = self.engine.ch.account_value(acc, marks)
+            ok, why = self.engine.pm.set_mode(user, bool(action.get("on")),
+                                              av)
+            return {"status": "ok" if ok else "err", "response": why}
+        if t == "pmSupply":
+            ok, why = self.engine.pm.supply(user, action["asset"],
+                                            int(action["amount"]))
+            return {"status": "ok" if ok else "err", "response": why}
+        if t == "pmBorrow":
+            ok, why = self.engine.pm.borrow(user, action["asset"],
+                                            int(action["amount"]))
+            return {"status": "ok" if ok else "err", "response": why}
+        if t == "pmRepay":
+            ok, why = self.engine.pm.repay(user, action["asset"],
+                                           int(action["amount"]))
+            return {"status": "ok" if ok else "err", "response": why}
         if t == "approveApiWallet":
             self.api_wallets[action["api_wallet"]] = user
             return {"status": "ok", "response": "approved"}

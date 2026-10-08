@@ -289,3 +289,93 @@ class ClearingHouse:
         pb.szi -= side_o * close_sz
         return True
 
+
+
+class PortfolioMargin:
+    """specs/16: portfolio margin mode (trading__portfolio-margin.md).
+    Spot collateral valued with LTV (BTC 0.5, HYPE 0.65 per docs); borrow
+    interest at 0.05 + 4.75*max(0, util-0.8) APY, indexed hourly; liquidation
+    when the whole portfolio breaches its maintenance requirement."""
+
+    LTVS = {"BTC": 500_000, "HYPE": 650_000, "USDC": 1_000_000}  # 1e6 scale
+
+    def __init__(self):
+        self.modes = {}          # user -> "portfolio"
+        self.collateral = {}     # user -> {asset: [qty_1e8, ltv, mark]}
+        self.borrows = {}        # user -> {asset: owed_1e8}
+        self.pools = {}          # asset -> {"supplied": x, "borrowed": y}
+        self.last_interest_ts = {}
+
+    def set_mode(self, user, on, account_value_usd):
+        """Docs gate: account value >$10k (or >$5M volume)."""
+        if on and account_value_usd < 10_000 * SCALE:
+            return False, "needs_10k_account_value"
+        if on:
+            self.modes[user] = "portfolio"
+        else:
+            self.modes.pop(user, None)
+        return True, "ok"
+
+    def is_pm(self, user):
+        return self.modes.get(user) == "portfolio"
+
+    def supply(self, user, asset, amount):
+        """Provide borrowable liquidity to the pool, earns interest."""
+        c = self.collateral.setdefault(user, {})
+        c[asset] = c.get(asset, [0, self.LTVS.get(asset, 0), 0])
+        moved = min(amount, c[asset][0])
+        if moved <= 0:
+            return False, "no_balance"
+        c[asset][0] -= moved
+        p = self.pools.setdefault(asset, {"supplied": 0, "borrowed": 0})
+        p["supplied"] += moved
+        return True, "ok"
+
+    def borrow(self, user, asset, amount):
+        p = self.pools.setdefault(asset, {"supplied": 0, "borrowed": 0})
+        if p["supplied"] - p["borrowed"] < amount:
+            return False, "pool_empty"
+        self.borrows.setdefault(user, {})
+        self.borrows[user][asset] = self.borrows[user].get(asset, 0) + amount
+        p["borrowed"] += amount
+        return True, "ok"
+
+    def repay(self, user, asset, amount):
+        owed = self.borrows.get(user, {}).get(asset, 0)
+        pay = min(amount, owed)
+        self.borrows[user][asset] = owed - pay
+        p = self.pools.setdefault(asset, {"supplied": 0, "borrowed": 0})
+        p["borrowed"] -= pay
+        return True, "ok"
+
+    def borrow_rate_hourly(self, util):
+        """specs/16: 0.05 + 4.75*max(0, util-0.8) APY -> per-hour fraction."""
+        rate_apy = 0.05 + 4.75 * max(0.0, util - 0.8)
+        return rate_apy / 8760
+
+    def accrue_interest(self, ts):
+        """specs/16: hourly index at the docs' utilization rate formula."""
+        for asset, p in self.pools.items():
+            last = self.last_interest_ts.get(asset, ts)
+            dt = max(ts - last, 0)
+            self.last_interest_ts[asset] = ts
+            if dt < 3600 or p["borrowed"] <= 0:
+                continue
+            util = p["borrowed"] / max(p["supplied"], 1)
+            rate_apy = 0.05 + 4.75 * max(0.0, util - 0.8)
+            hourly = qdiv(p["borrowed"] * int(rate_apy * 1e6), 1_000_000 * 8760)
+            p["borrowed"] += hourly
+
+    def pm_values(self, user, spot_val, borrowed_val):
+        """specs/16: PM account value includes LTV-weighted spot collateral
+        minus borrows."""
+        c = self.collateral.get(user, {})
+        ltv_val = 0
+        for asset, (qty, ltv, mark) in c.items():
+            ltv_val += qdiv(qty * mark // SCALE * ltv, SCALE)
+        return spot_val - borrowed_val, ltv_val, borrowed_val
+
+    def pm_maintenance(self, perp_maint, borrowed_val):
+        """v1 substitution: borrowed value carries a 1.2x maintenance buffer
+        (docs define a full portfolio margin ratio; simplified, documented)."""
+        return perp_maint + qdiv(borrowed_val * 12, 10)

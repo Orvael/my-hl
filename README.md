@@ -11,6 +11,18 @@ engine claims were re-verified against those live pages.
 
 ## Run
 
+    ./run.sh                 # one command: testnet + UI at http://localhost:8770
+    PORT=9000 ./run.sh       # custom port
+    python3 tools/bench.py   # performance: ~480k orders/sec place, ~680k match/sec
+
+## What you get in one command
+Engine + chain + API + streaming UI, seeded BTC market with a live price walk,
+PURR/USDC spot with Hyperliquidity, HLP + user-created vaults, staking,
+leaderboard, referral program, portfolio margin, faucet. Sign in with any
+account name and trade.
+
+## Run (dev)
+
     cd ~/Documents/my-hl
     python3 -c "
     import sys; sys.path.insert(0, '.')

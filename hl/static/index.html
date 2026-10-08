@@ -135,10 +135,10 @@ input::placeholder{color:var(--dim2)}
 /* ---- chart ---- */
 .ctabs{display:inline-flex;gap:2px;background:var(--p2);border:1px solid var(--ln);
   border-radius:8px;padding:2px;margin-bottom:8px}
-.ctabs span{font-size:10.5px;letter-spacing:.04em;color:var(--dim);cursor:pointer;
-  padding:4px 12px;border-radius:6px;transition:var(--tr)}
-.ctabs span.on{background:var(--p3);color:var(--txt)}
-.ctabs span:not(.on):hover{color:var(--txt)}
+.ctabs span,.ctabs div{font-size:10.5px;letter-spacing:.04em;color:var(--dim);
+  cursor:pointer;padding:4px 12px;border-radius:6px;transition:var(--tr)}
+.ctabs span.on,.ctabs div.on{background:var(--p3);color:var(--txt)}
+.ctabs span:not(.on):hover,.ctabs div:not(.on):hover{color:var(--txt)}
 canvas{width:100%;display:block;border-radius:8px}
 /* ---- tabs + tables ---- */
 .tabs{display:flex;gap:2px;margin-bottom:8px;border-bottom:1px solid var(--ln);
@@ -593,6 +593,42 @@ function drawDepth(){
     if(i)drawDepth();
   };
   $('ctabs').appendChild(d); });
+function toggleMkt(ev){ ev.stopPropagation();
+  var m=$('mktmenu');
+  if (m.classList.contains('open')){ m.classList.remove('open'); return; }
+  api('/info',{type:'meta'},mt=>{
+    api('/info',{type:'allMids'},am=>{
+      var h='<div class="mnote">perp markets</div>';
+      (mt.universe||[]).forEach(u=>{
+        var p=am[u.name]?parseFloat(am[u.name]):null;
+        h+='<div class="mi'+(u.name===COIN?' on':'')+
+          '" onclick="pickMkt(\''+u.name+'\')"><span>'+u.name+'-USD</span>'+
+          '<span class="p num">'+(p===null?'—':
+            p.toLocaleString(undefined,{maximumFractionDigits:1}))+'</span></div>';});
+      h+='<div class="mnote">more markets appear as the testnet seeds them</div>';
+      m.innerHTML=h; m.classList.add('open');
+    });
+  });
+}
+function pickMkt(c){
+  $('mktmenu').classList.remove('open');
+  if (c!==COIN){
+    COIN=c; $('mkt_sym').textContent=c+'-USD';
+    candles=[]; BOOK.bids=[]; BOOK.asks=[];
+    if (series) series.setData([]);
+    if (WS) WS.close();
+    backfill();
+  }
+}
+document.addEventListener('click',e=>{
+  var m=$('mktmenu');
+  if (m && m.classList.contains('open') && !e.target.closest('.mkt'))
+    m.classList.remove('open');
+});
+document.addEventListener('keydown',e=>{
+  if (e.key==='Escape'){ closeM('m_sign'); closeM('m_dep');
+    $('mktmenu').classList.remove('open'); }
+});
 function signed(){ return !!ME; }
 function requireAuth(cb){ if (signed()) return cb(); openSign(); }
 function openSign(){ $('m_sign').style.display='flex'; $('sign_name').focus(); }
@@ -749,29 +785,41 @@ function refreshPage(){
   if (p==='p-spot') refreshSpot();
   if (p==='p-vaults'){ vlist(); api('/info',{type:'vault',user:ME},v=>{ if(!v) return;
     $('v_eq').textContent='$'+parseFloat(v.equity).toLocaleString(undefined,{maximumFractionDigits:0});
-    $('v_sp').textContent=v.sharePx; $('v_me').textContent=v.yourShares;});
+    $('v_sp').textContent=v.sharePx; $('v_me').textContent=v.yourShares;}); }
   if (p==='p-board') api('/info',{type:'leaderboard'},rows=>{
-    var t='<table><tr><th>#</th><th>account</th><th>value</th><th>volume</th></tr>';
-    (rows||[]).forEach(r=>{t+='<tr><td>'+r.rank+'</td><td>'+r.user+'</td><td class="b">$'+
-      r.accountValue+'</td><td>$'+r.volume+'</td></tr>';});
-    $('board').innerHTML=t+'</table>';});
+    var t='<tr><th>#</th><th>account</th><th>value</th><th>volume</th></tr>';
+    (rows||[]).forEach(r=>{
+      var rk = r.rank<=3 ? '<span class="medal m'+r.rank+'">'+r.rank+'</span>'
+                         : '<span class="mut">'+r.rank+'</span>';
+      t+='<tr><td>'+rk+'</td><td>'+r.user+'</td><td class="b num">$'+
+        r.accountValue+'</td><td class="num">$'+r.volume+'</td></tr>';});
+    $('board').innerHTML='<table>'+t+'</table>';});
   if (p==='p-staking') api('/info',{type:'staking',user:ME},s=>{
     if (!s) return;
-    var t='<table><tr><th>validator</th><th>stake</th><th>commission</th><th>status</th></tr>';
-    (s.validators||[]).forEach(v=>{t+='<tr><td>'+v.validator+'</td><td>'+v.totalStake+
-      '</td><td>'+v.commission+'</td><td>'+(v.jailed?'<span class="a">JAILED</span>':'active')+
-      '</td></tr>';});
-    $('vals').innerHTML=t+'</table>';
-    $('mydel').textContent = JSON.stringify(s.delegations||{}) + ' · rewards: ' + (s.rewards||'0');});
+    var t='<tr><th>validator</th><th>stake</th><th>commission</th><th>status</th></tr>';
+    (s.validators||[]).forEach(v=>{
+      t+='<tr><td>'+v.validator+'</td><td class="num">'+v.totalStake+
+        '</td><td class="num">'+v.commission+'</td><td>'+
+        (v.jailed?'<span class="pill bad">jailed</span>'
+                 :'<span class="pill ok">active</span>')+'</td></tr>';});
+    $('vals').innerHTML='<table>'+t+'</table>';
+    $('mydel').textContent = Object.keys(s.delegations||{}).length
+      ? JSON.stringify(s.delegations) : 'no delegations yet';
+    $('rew').textContent = 'rewards '+(s.rewards||'0');});
   if (p==='p-ref') api('/info',{type:'referral',user:ME},r=>{
     $('r_code').textContent=r.code; $('r_n').textContent=(r.referred||[]).length;
     $('r_e').textContent='$'+r.earned;
-    $('r_owner').placeholder = r.canRefer ? 'you can refer others' : 'need $10k volume to own a code';});
+    $('r_code').parentNode.style.cursor='pointer';
+    $('r_code').parentNode.onclick=()=>{
+      navigator.clipboard.writeText($('r_code').textContent);
+      toast('referral code copied','ok');};
+    $('r_owner').placeholder = r.canRefer ? 'you can refer others'
+      : 'need $10k volume to own a code';});
 }
 var _origRefresh = refresh;
 refresh = function(){ _origRefresh(); refreshPage(); };
 if (ME) signed_ui();
-initChart(); ws(); refresh(); setInterval(refresh, 3000);
+initChart(); ws(); backfill(); refresh(); setInterval(refresh, 3000);
 </script>
 </body>
 </html>
