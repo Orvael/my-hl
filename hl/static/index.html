@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>my-hl · trade anything</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%2350d2c1'/%3E%3Ctext x='8' y='12' font-size='10' font-weight='bold' text-anchor='middle' fill='%2304211d'%3EH%3C/text%3E%3C/svg%3E">
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 :root{--bg:#0b0e11;--p1:#12161c;--p2:#181e26;--ln:#232b36;--up:#0ecb81;--dn:#f6465d;
@@ -58,6 +59,12 @@ td:first-child,th:first-child{text-align:left}
 .lev div.on{color:var(--acc);border:1px solid var(--acc)}
 canvas{width:100%;display:block}
 .note{color:var(--dim);font-size:11px;line-height:1.5}
+@media(max-width:1100px){
+  .grid3{grid-template-columns:1fr}
+  nav{overflow-x:auto}
+  nav .right{margin-left:0}
+}
+@media(max-width:700px){ .statgrid{grid-template-columns:1fr 1fr} }
 </style>
 </head>
 <body>
@@ -87,13 +94,16 @@ canvas{width:100%;display:block}
     <div class="panel"><h4>Order book</h4>
       <div id="asks"></div><div class="mid" id="mid">—</div><div id="bids"></div></div>
     <div class="panel"><h4>BTC-USDC · Powered by Lightweight Charts</h4>
+      <div class="lev" id="ctabs" style="margin-bottom:6px"></div>
       <div id="chart" style="height:380px"></div>
+      <canvas id="depthcv" style="display:none;height:380px"></canvas>
       <h4 style="margin-top:8px">Trades</h4><table id="tape"></table></div>
     <div>
       <div class="panel"><h4>Order · <span id="who2">—</span></h4>
         <div class="lev" id="levs"></div>
         <input id="px_in" type="number" placeholder="Price (USDC)">
         <input id="sz_in" type="number" step="0.01" placeholder="Size (BTC)">
+        <div class="lev" id="pcts"></div>
         <select id="tif"><option>GTC</option><option>IOC</option><option>ALO</option></select>
         <div style="display:flex;gap:6px">
           <button class="btn" style="background:var(--up);flex:1" onclick="send(1)">Buy</button>
@@ -248,12 +258,59 @@ function ws(){
     $('asks').innerHTML = (d.asks||[]).slice(0,11).reverse().map(l=>
       '<div class="row"><span class="a">'+l[0].toFixed(1)+'</span><span>'+l[1].toFixed(2)+
       '</span><span class="bar" style="width:'+Math.min(l[1]/mx*100,100)+'%;background:var(--dn)"></span></div>').join('');
+    BOOK.bids = d.bids||[]; BOOK.asks = d.asks||[]; drawDepth();
     var trs = (d.trades||[]).slice(0,12);
     $('tape').innerHTML = '<tr><th>price</th><th>size</th><th>side</th></tr>' +
       trs.map(t=>'<tr><td class="'+(t.buy?'b':'a')+'">'+t.px.toFixed(1)+'</td><td>'+
         t.sz.toFixed(3)+'</td><td>'+(t.buy?'BUY':'SELL')+'</td></tr>').join('');
   };
 }
+var BOOK = {bids:[],asks:[]};
+function drawDepth(){
+  var cv=$('depthcv'); if(cv.style.display==='none')return;
+  var w=cv.clientWidth||900; if(Math.abs(cv.width-w)>1)cv.width=w;
+  if(cv.height!==380)cv.height=380;
+  var ctx=cv.getContext('2d'),W=cv.width,H=cv.height;
+  ctx.clearRect(0,0,W,H);
+  var B=BOOK.bids,A=BOOK.asks;
+  if(!B.length||!A.length)return;
+  var mid=(B[0][0]+A[0][0])/2;
+  var ext=Math.max(mid-B[0][0],A[0][0]-mid,mid*0.002)*1.15;
+  var lo=mid-ext,hi=mid+ext;
+  var X=px=>(px-lo)/(hi-lo)*W;
+  var cum=[],s=0,i;
+  for(i=0;i<B.length;i++){s+=B[i][1];cum.push([B[i][0],s])}
+  var cum2=[],s2=0;
+  for(i=0;i<A.length;i++){s2+=A[i][1];cum2.push([A[i][0],s2])}
+  var mx=Math.max(s,s2,1e-9);
+  var y=v=>H-16-v/mx*(H-30);
+  ctx.beginPath();ctx.moveTo(X(cum[0][0]),y(0));
+  for(i=0;i<cum.length;i++)ctx.lineTo(X(cum[i][0]),y(cum[i][1]));
+  ctx.lineTo(X(cum[cum.length-1][0]),y(0));ctx.closePath();
+  ctx.fillStyle='rgba(14,203,129,.22)';ctx.fill();
+  ctx.strokeStyle='#0ecb81';ctx.stroke();
+  ctx.beginPath();ctx.moveTo(X(cum2[0][0]),y(0));
+  for(i=0;i<cum2.length;i++)ctx.lineTo(X(cum2[i][0]),y(cum2[i][1]));
+  ctx.lineTo(X(cum2[cum2.length-1][0]),y(0));ctx.closePath();
+  ctx.fillStyle='rgba(246,70,93,.22)';ctx.fill();
+  ctx.strokeStyle='#f6465d';ctx.stroke();
+  ctx.strokeStyle='rgba(255,255,255,.25)';ctx.setLineDash([3,3]);
+  ctx.beginPath();ctx.moveTo(X(mid)+.5,4);ctx.lineTo(X(mid)+.5,H-16);ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle='#707a8a';ctx.font='10px monospace';
+  ctx.fillText(lo.toFixed(0),4,H-4);
+  ctx.textAlign='right';ctx.fillText(hi.toFixed(0),W-4,H-4);ctx.textAlign='left';
+}
+['Candles','Depth'].forEach((l,i)=>{
+  var d=document.createElement('div'); if(!i)d.className='on'; d.textContent=l;
+  d.onclick=()=>{
+    $('ctabs').querySelectorAll('div').forEach(x=>x.classList.remove('on'));
+    d.classList.add('on');
+    $('chart').style.display=i?'none':'block';
+    $('depthcv').style.display=i?'block':'none';
+    if(i)drawDepth();
+  };
+  $('ctabs').appendChild(d); });
 function signed(){ return !!ME; }
 function requireAuth(cb){ if (signed()) return cb(); openSign(); }
 function openSign(){ $('m_sign').style.display='flex'; $('sign_name').focus(); }
@@ -292,7 +349,18 @@ function xfer(toPerp){
 function setpx(f){ if(lastMid) $('px_in').value = (lastMid*f).toFixed(1); }
 ['0.995','1','1.005'].forEach((f,i)=>{
   var d=document.createElement('div'); d.textContent=(f==='1'?'MID':(i?'+0.5%':'-0.5%'));
-  d.onclick=()=>setpx(parseFloat(f)); $('levs').parentNode.insertBefore(d, $('px_in')); });
+  d.onclick=()=>setpx(parseFloat(f)); $('levs').appendChild(d); });
+var AVAIL=0;
+function setPct(p){
+  if(!lastMid) return toast('no price yet');
+  var sz=AVAIL*p/lastMid;
+  if(!(sz>0)) return toast('no margin available - faucet first');
+  $('px_in').value=lastMid.toFixed(1);
+  $('sz_in').value=(Math.floor(sz*100)/100).toFixed(2);
+}
+['25%','50%','75%','100%'].forEach((l,i)=>{
+  var d=document.createElement('div'); d.textContent=l;
+  d.onclick=()=>setPct([.25,.5,.75,1][i]); $('pcts').appendChild(d); });
 function send(is_buy){
   requireAuth(() => {
     var px = Math.round(parseFloat($('px_in').value||'0')*1e8);
@@ -315,6 +383,7 @@ function refresh(){
   api('/info',{type:'userState',user:ME},s=>{
     if (!s.marginSummary) return;
     $('av').textContent = '$'+parseFloat(s.marginSummary.accountValue).toLocaleString(undefined,{maximumFractionDigits:2});
+    AVAIL = parseFloat(s.withdrawable||'0')||0;
     var t='';
     (s.assetPositions||[]).forEach(p=>{var q=p.position;
       t+='<table><tr><th>coin</th><th>size</th><th>entry</th><th>uPnL</th></tr><tr><td>'+
