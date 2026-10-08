@@ -33,9 +33,12 @@ def fmt_px(px):
 class ApiState:
     """Server state around one Engine. All /info reads + /exchange writes."""
 
-    def __init__(self, engine, spot=None):
+    def __init__(self, engine, spot=None, staking=None, vault=None):
         self.engine = engine
         self.spot = spot
+        self.staking = staking
+        self.vault = vault
+        self.referrals_ui = {}   # user -> {code, referred: [], earned}
         self.lock = threading.RLock()
         self.used_nonces = set()
         self.api_wallets = {}       # api_addr -> master_addr
@@ -93,6 +96,90 @@ class ApiState:
             return self._open_orders(req["user"])
         if t == "userFills":
             return self._user_fills(req["user"])
+        if t == "leaderboard":
+            rows = []
+            for u, a in self.engine.ch.accounts.items():
+                if u.startswith("vault_") or u == "lp_bot" or u == "sim_bot":
+                    continue
+                marks = {c: self.engine.mark(c) for c in self.engine.assets}
+                av = self.engine.ch.account_value(a, marks)
+                rows.append({"user": u,
+                             "accountValue": fmt_px(av),
+                             "volume": fmt_px(self.engine.volume.get(u, 0))})
+            rows.sort(key=lambda r: -float(r["accountValue"]))
+            return [{"rank": i + 1, **r} for i, r in enumerate(rows[:50])]
+        if t == "staking":
+            st = self.staking
+            if st is None:
+                return {"validators": []}
+            out = []
+            for name, v in st.validators.items():
+                out.append({"validator": name,
+                            "totalStake": fmt_px(st.total_stake(name)),
+                            "commission": "%d%%" % v["commission_pct"],
+                            "jailed": v["jailed"]})
+            out.sort(key=lambda r: -float(r["totalStake"].replace(",", "")))
+            u = req.get("user")
+            return {"validators": out,
+                    "delegations": st.delegations.get(u, {}),
+                    "rewards": fmt_px(st.rewards.get(u, 0))}
+        if t == "vault":
+            v = self.vault
+            if v is None:
+                return None
+            marks = {c: self.engine.mark(c) for c in self.engine.assets}
+            u = req.get("user")
+            return {"name": v.name, "equity": fmt_px(v.equity(marks)),
+                    "sharePx": fmt_px(v.share_px(marks)),
+                    "totalShares": fmt_px(v.total_shares),
+                    "yourShares": fmt_px(v.shares.get(u, 0)),
+                    "lockedUntil": v.last_deposit_ts.get(u, 0) + 4 * 86400}
+        if t == "referral":
+            u = req.get("user")
+            r = self.engine
+            code = u[:8] if u else ""
+            return {"code": code,
+                    "referred": sorted(r.referrals.get(x, x)
+                                       for x in r.referrals
+                                       if r.referrals.get(x) == code),
+                    "earned": fmt_px(r.referral_rewards.get(u, 0)),
+                    "canRefer": r.volume.get(u, 0) >= 10_000 * 10 ** 8}
+        if t == "spotMeta":
+            if self.spot is None:
+                return {"tokens": [], "pairs": []}
+            toks = [{"idx": i, "name": tk.name,
+                     "szDecimals": tk.sz_decimals}
+                    for i, tk in sorted(self.spot.tokens.items())]
+            pairs = [{"pair": "%s/USDC" % self.spot.tokens[k[0]].name,
+                      "base": k[0]} for k in sorted(self.spot.pairs)]
+            return {"tokens": toks, "pairs": pairs}
+        if t == "spotBook":
+            if self.spot is None:
+                return None
+            key = (int(req["base"]), 0)
+            p = self.spot.pairs.get(key)
+            if p is None:
+                return None
+            b = p["book"]
+
+            def lv(side, rev):
+                out = []
+                for px in sorted(side, reverse=rev)[:10]:
+                    tot = sum(o.sz_rem for o in side[px])
+                    out.append([fmt_px(px),
+                                tot / 10 ** self.spot.tokens[key[0]].wei_decimals])
+                return out
+            return {"bids": lv(b.bids, True), "asks": lv(b.asks, False)}
+        if t == "spotBalances":
+            if self.spot is None:
+                return {}
+            u = req.get("user")
+            out = {}
+            for idx, tk in self.spot.tokens.items():
+                w = self.spot.bal(u, idx)
+                if w:
+                    out[tk.name] = w / 10 ** tk.wei_decimals
+            return out
         return None
 
     def _user_state(self, user):
@@ -264,8 +351,52 @@ class ApiState:
                 return {"status": "err", "response": "already_fauceted"}
             amt = 10_000 * 10 ** 8
             self.engine.deposit(user, amt)
+            if self.spot is not None:
+                self.spot._add(user, 0, 10_000 * 10 ** 8)
             self.faucet_given.add(user)
             return {"status": "ok", "response": "fauceted_10000_usdc"}
+        if t == "delegate" and self.staking is not None:
+            ok = self.staking.delegate(user, action["validator"],
+                                       int(action["amount"]))
+            return {"status": "ok" if ok else "err",
+                    "response": "delegated" if ok else "no_validator"}
+        if t == "vaultDeposit" and self.vault is not None:
+            marks = {c: self.engine.mark(c) for c in self.engine.assets}
+            amt = int(action["amount"])
+            acc = self.engine.ch.acc(user)
+            if acc.usd < amt:
+                return {"status": "err", "response": "insufficient"}
+            ok = self.vault.deposit(user, amt, int(time.time()), marks)
+            return {"status": "ok" if ok else "err", "response": "deposited"}
+        if t == "vaultWithdraw" and self.vault is not None:
+            marks = {c: self.engine.mark(c) for c in self.engine.assets}
+            got = self.vault.withdraw(user, int(action.get("num", 1)),
+                                      int(action.get("den", 1)),
+                                      int(time.time()), marks)
+            if got is None:
+                return {"status": "err", "response": "locked_or_empty"}
+            self.engine.ch.acc(user).usd += got
+            return {"status": "ok", "response": fmt_px(got)}
+        if t == "setReferral":
+            ok, why = self.engine.refer(action["code_owner"], user)
+            return {"status": "ok" if ok else "err", "response": why}
+        if t == "spotOrder" and self.spot is not None:
+            st, fills = self.spot.place_spot(
+                user, int(action["base"]), bool(action["is_buy"]),
+                int(action["px"]), int(action["sz"]),
+                action.get("tif", "GTC"))
+            if st is None:
+                return {"status": "err", "response": str(fills)}
+            for f in fills:
+                self.record_event({"t": "spot_fill", "base": action["base"],
+                                   "px": f["px"], "sz": f["sz"],
+                                   "is_buy": bool(action["is_buy"]),
+                                   "taker": user, "maker": f["maker_user"],
+                                   "ts": self.engine.block_ts})
+            return {"status": "ok", "response": {"status": st}}
+        if t == "faucetSpot" and self.spot is not None:
+            self.spot._add(user, 0, 10_000 * 10 ** 8)   # spot USDC
+            return {"status": "ok", "response": "spot_usdc_10000"}
         if t == "approveApiWallet":
             self.api_wallets[action["api_wallet"]] = user
             return {"status": "ok", "response": "approved"}

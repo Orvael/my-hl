@@ -25,9 +25,30 @@ ASSETS = {"BTC": {"max_leverage": 20, "sz_decimals": 2,
 
 def main():
     chain = Blockchain(ASSETS, {"v1": 40, "v2": 30, "v3": 30})
-    api = ApiState(chain.sim.nodes[chain.sim._leader()].engine)
+    from hl.spot import SpotStore
+    from hl.staking import Staking
+    from hl.vaults import HlpVault
+    spot = SpotStore()
+    staking = Staking()
+    vault = HlpVault()
+    staking.register("v1", 40_000 * S, 3)
+    staking.register("v2", 30_000 * S, 5)
+    staking.register("v3", 30_000 * S, 5)
+    api = ApiState(chain.sim.nodes[chain.sim._leader()].engine, spot=spot,
+                   staking=staking, vault=vault)
     e = api.engine
     e.set_oracle("BTC", 82_000 * S)
+
+    # spot: PURR/USDC seeded + Hyperliquidity quoting
+    pidx, _ = spot.deploy("PURR", 5, 0, 600_000_000 * 10 ** 5, "system", {})
+    spot._add("hip2_%d" % pidx, pidx, 5_000 * 10 ** 5)
+    spot._add("hip2_%d" % pidx, 0, 20_000 * S)
+    spot.place_spot("hip2_%d" % pidx, pidx, False, 4 * S, 10 * 10 ** 5, "ALO")
+    spot.add_hl((pidx, 0), 4 * S, 3, 10 * 10 ** 5, 2, 0)
+
+    # HLP vault seed equity
+    marks0 = {"BTC": 82_000 * S}
+    vault.deposit("treasury", 5_000_000 * S, 0, marks0)
 
     # genesis block: oracle + liquidity seed (each order under the $5M cap)
     seed = [{"t": "oracle", "coin": "BTC", "px": 82_000 * S},
@@ -106,6 +127,8 @@ def main():
                         {"coin": "BTC", "is_buy": is_buy, "limit_px": px_off,
                          "sz": 50 * S, "tif": "ALO"}]})
         # --- block production from live traffic ---
+        if tick % 8 == 0:
+            spot.hl_pass((pidx, 0), int(time.time()))
         actions = []
         with api.lock:
             if api.action_log:
