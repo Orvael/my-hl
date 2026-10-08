@@ -501,11 +501,9 @@ function backfill(){
 var COIN = localStorage.getItem('myhl_coin') || 'BTC';
 document.getElementById('coinSel').value = COIN;
 document.getElementById('coinSel').onchange = function(){
-  COIN = this.value;
-  localStorage.setItem('myhl_coin', COIN);
-  candles.length = 0; RAW.length = 0; prevPx = null; BOOK = {bids:[],asks:[]};
-  if (WS) WS.close();
-  refresh(); };, WS=null, prevPx=null, lastTradeTs=0, TF=60000, RAW=[],
+  localStorage.setItem('myhl_coin', this.value);
+  pickMkt(this.value); };
+var WS=null, prevPx=null, lastTradeTs=0, TF=60000, RAW=[],
     SZD=2, BOOK={bids:[],asks:[]};
 function ws(){
   WS = new WebSocket((location.protocol==='https:'?'wss://':'ws://')+
@@ -668,6 +666,7 @@ function pickMkt(c){
   $('mktmenu').classList.remove('open');
   if (c===COIN) return;
   COIN=c;
+  localStorage.setItem('myhl_coin', c);
   $('mkt_sym').textContent=c+'-USD';
   $('bhead').textContent=c+'-USDC';
   $('chead').textContent=c+'-USDC';
