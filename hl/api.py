@@ -546,6 +546,12 @@ class ApiState:
             self.spot._add(user, 0, 10_000 * 10 ** 8)
             self.faucet_given.add(user)
             return {"status": "ok", "response": "spot_usdc_10000"}
+        if t == "oracle":
+            self.engine.set_oracle(action["coin"], int(action["px"]))
+            if eng is not None:
+                eng.append({"t": "oracle", "coin": action["coin"],
+                            "px": int(action["px"])})
+            return {"status": "ok", "response": "oracle_set"}
         if t == "pmMode":
             if eng is not None:
                 eng.append({"t": "pmMode", "user": user,

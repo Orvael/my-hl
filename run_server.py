@@ -196,7 +196,16 @@ def main():
             drift[coin] = max(-0.34, min(0.34,
                 drift[coin] + rng.gauss(0, 0.18)))
             if rng.random() < 0.55:
-                side = rng.random() < (0.5 + drift[coin])
+                # inventory-aware: sim_bot mean-reverts instead of hoarding
+                # inventory until margin death thins the book to nothing
+                pos = e.ch.acc("sim_bot").positions.get(coin)
+                held = abs(pos.szi) if pos else 0
+                if held > 300 * S:
+                    side = pos.szi < 0      # too long -> force sell
+                elif held > 0 and rng.random() < 0.5:
+                    side = pos.szi > 0
+                else:
+                    side = rng.random() < (0.5 + drift[coin])
                 sz = rng.randint(2, 20) * S
                 # offset >= spread: on wide-for-size markets (DOGE +/- $0.01
                 # on $0.15) a fixed +/-0.9% never crosses
@@ -242,6 +251,12 @@ def main():
                             {"coin": coin, "is_buy": is_buy,
                              "limit_px": px_off, "sz": 50 * S,
                              "tif": "ALO"}]})
+        # keep the bots funded — margin death thins the book to nothing
+        if tick % 25 == 0:
+            marks = {c: e.mark(c) for c in ASSETS}
+            for bname in ("sim_bot", "lp_bot"):
+                if e.ch.account_value(e.ch.acc(bname), marks) < 2_000_000 * S:
+                    e.deposit(bname, 10_000_000 * S)
         # live candle updates per market
         for coin in ASSETS:
             cstore = api.candles[coin]
