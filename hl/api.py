@@ -668,25 +668,24 @@ def make_server(api_state, chain=None, host="127.0.0.1", port=0):
             self.wfile.write(body)
 
         def _ws_upgrade(self):
-            """specs/15: the real typed subscription protocol.
-            Client: {"method":"subscribe","subscription":{...}} (masked frames).
-            Server pushes per-sub payloads (unmasked) every tick."""
+            """specs/15: typed subscriptions with a real push loop.
+            Reader thread handles client frames (subscribe/unsubscribe/ping);
+            the connection thread pushes snapshots every 300ms."""
             import base64 as b64
             import hashlib
             key = self.headers.get("Sec-WebSocket-Key")
             if not key:
                 return self._json(400, {"error": "no_ws_key"})
-            accept = b64.b64encode(
-                hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
-                             .encode()).digest()).decode()
+            accept = b64.b64encode(hashlib.sha1(
+                (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+                .encode()).digest()).decode()
             self.send_response(101)
             self.send_header("Upgrade", "websocket")
             self.send_header("Connection", "Upgrade")
             self.send_header("Sec-WebSocket-Accept", accept)
             self.end_headers()
-
-            class Frame:
-                pass
+            subs = []
+            stop = threading.Event()
 
             def read_client_frame():
                 hdr = b""
@@ -699,11 +698,9 @@ def make_server(api_state, chain=None, host="127.0.0.1", port=0):
                 masked = hdr[1] & 0x80
                 ln = hdr[1] & 0x7F
                 if ln == 126:
-                    ext = self.rfile.read(2)
-                    ln = int.from_bytes(ext, "big")
+                    ln = int.from_bytes(self.rfile.read(2), "big")
                 elif ln == 127:
-                    ext = self.rfile.read(8)
-                    ln = int.from_bytes(ext, "big")
+                    ln = int.from_bytes(self.rfile.read(8), "big")
                 mask = self.rfile.read(4) if masked else None
                 payload = self.rfile.read(ln) if ln else b""
                 if mask:
@@ -711,11 +708,9 @@ def make_server(api_state, chain=None, host="127.0.0.1", port=0):
                                     for i, b in enumerate(payload))
                 return op, payload
 
-            subs = []
-
             def snapshot(sub):
                 e = api_state.engine
-                st = sub["type"]
+                st = sub.get("type")
                 if st == "allMids":
                     out = {}
                     for coin in sorted(e.assets):
@@ -728,101 +723,98 @@ def make_server(api_state, chain=None, host="127.0.0.1", port=0):
                     b2 = e.books.get(sub.get("coin", "BTC"))
                     if b2 is None:
                         return None
-                    lvls = [
-                        [[fmt_px(px), str(sum(o.sz_rem for o in b2.bids[px])
-                                          / 1e8), len(b2.bids[px])]
-                          for px in sorted(b2.bids, reverse=True)[:20]],
-                        [[fmt_px(px), str(sum(o.sz_rem for o in b2.asks[px])
-                                          / 1e8), len(b2.asks[px])]
-                          for px in sorted(b2.asks)[:20]]]
+                    def lvls(side, rev):
+                        out = []
+                        for px in sorted(side, reverse=rev)[:20]:
+                            tot = sum(o.sz_rem for o in side[px])
+                            out.append([px / 1e8,
+                                        tot / 1e8, len(side[px])])
+                        return out
                     return {"channel": "l2Book", "coin": sub.get("coin"),
                             "data": {"coin": sub.get("coin"),
                                      "time": int(time.time() * 1000),
-                                     "levels": lvls}}
+                                     "levels": [lvls(b2.bids, True),
+                                                lvls(b2.asks, False)]}}
                 if st == "trades":
-                    t = [{"coin": ev["coin"], "px": fmt_px(ev["px"]),
-                          "sz": str(ev["sz"] / 1e8), "side": "B" if ev["is_buy"] else "A",
-                          "time": ev["ts"]}
-                         for ev in api_state.events[-30:] if ev.get("t") == "fill"]
+                    t = [{"coin": ev["coin"], "px": ev["px"] / 1e8,
+                          "sz": ev["sz"] / 1e8, "buy": ev["is_buy"]}
+                         for ev in api_state.events[-30:]
+                         if ev.get("t") == "fill"]
                     return {"channel": "trades", "data": t}
-                if st == "candle":
-                    t = [{"coin": ev["coin"], "px": ev["px"], "sz": ev["sz"],
-                          "ts": ev["ts"]} for ev in api_state.events[-60:]
-                         if ev.get("t") == "fill" and ev["coin"] == sub.get("coin")]
-                    out = {}
-                    for x in t:
-                        m = x["ts"] * 1000 // 60000 * 60000
-                        c = out.setdefault(m, [x["px"], x["px"], x["px"], x["px"]])
-                        c[1] = max(c[1], x["px"]); c[2] = min(c[2], x["px"])
-                        c[3] = x["px"]
-                    return {"channel": "candle", "data": [
-                        {"t": m, "o": c[0], "h": c[1], "l": c[2], "c": c[3]}
-                        for m, c in sorted(out.items())]}
-                if st in ("userEvents", "orderUpdates", "userFills"):
+                if st in ("userEvents", "userFills", "orderUpdates"):
                     u = sub.get("user")
-                    evs = [dict(ev) for ev in api_state.events
+                    evs = [ev for ev in api_state.events
                            if ev.get("t") == "fill"
                            and (ev.get("taker") == u or ev.get("maker") == u)]
-                    return {"channel": st, "data": evs[-20:]}
+                    return {"channel": st, "data": len(evs)}
                 if st == "clearinghouseState":
-                    s = api_state.info({"type": "userState",
-                                        "user": sub.get("user")})
-                    return {"channel": "clearinghouseState", "data": s}
+                    return {"channel": "clearinghouseState",
+                            "data": api_state.info(
+                                {"type": "userState",
+                                 "user": sub.get("user")})}
                 return None
 
+            def reader():
+                try:
+                    while not stop.is_set():
+                        op, payload = read_client_frame()
+                        if op == 8:
+                            stop.set()
+                            return
+                        if op == 9:
+                            self.wfile.write(_ws_frame_bytes(0x8A, payload))
+                            continue
+                        if op != 1:
+                            continue
+                        try:
+                            msg = json.loads(payload)
+                        except Exception:
+                            continue
+                        m = msg.get("method")
+                        sub = msg.get("subscription", {})
+                        if m == "subscribe":
+                            subs.append(sub)
+                            self.wfile.write(_ws_frame_bytes(0x81, json.dumps(
+                                {"channel": "subscriptionResult", "sub": sub})))
+                        elif m == "unsubscribe":
+                            subs[:] = [s for s in subs
+                                       if s.get("type") != sub.get("type")]
+                except Exception:
+                    stop.set()
+
+            threading.Thread(target=reader, daemon=True).start()
             try:
-                while True:
-                    op, payload = read_client_frame()
-                    if op == 8:
-                        return
-                    if op == 9:  # ping -> pong
-                        self.wfile.write(_ws_frame_bytes(0x8A, payload))
-                        continue
-                    if op != 1:
-                        continue
-                    try:
-                        msg = json.loads(payload)
-                    except Exception:
-                        continue
-                    method = msg.get("method")
-                    sub = msg.get("subscription", {})
-                    if method == "subscribe":
-                        subs.append(sub)
-                        self.wfile.write(_ws_frame_bytes(
-                            0x81, json.dumps({"channel": "subscriptionResult",
-                                              "sub": sub})))
-                    elif method == "unsubscribe":
-                        subs = [s for s in subs
-                                if s.get("type") != sub.get("type")]
-                    with api_state.lock:
-                        for sub in subs:
-                            snap = snapshot(sub)
-                            if snap is not None:
-                                self.wfile.write(_ws_frame_bytes(
-                                    0x81, json.dumps(snap, separators=(",", ":"))))
+                while not stop.is_set():
+                    if subs:
+                        with api_state.lock:
+                            snaps = [snapshot(s) for s in list(subs)]
+                        for s in snaps:
+                            if s is not None:
+                                self.wfile.write(_ws_frame_bytes(0x81, json.dumps(
+                                    s, separators=(",", ":"))))
+                        self.wfile.flush()
                     time.sleep(0.3)
             except Exception:
-                return
+                stop.set()
 
         def do_GET(self):
             if self.path == "/ws":
                 self._ws_upgrade()
                 return
-            if self.path == "/static/lwc.js":
-                with open(static_dir + "/lwc.js", "rb") as fp:
-                    return self._resp(200, fp.read(), "application/javascript")
             if self.path == "/" or self.path.startswith("/index"):
                 with open(static_path, "rb") as fp:
                     return self._html(200, fp.read())
+            if self.path == "/static/lwc.js":
+                with open(static_dir + "/lwc.js", "rb") as fp:
+                    return self._resp(200, fp.read(), "application/javascript")
             if self.path == "/health":
                 return self._json(200, {"status": "ok"})
             if self.path.startswith("/candles"):
                 coin = "BTC"
                 if "coin=" in self.path:
                     coin = self.path.split("coin=")[1].split("&")[0]
-                return self._json(200,
-                                  {"candles": getattr(api_state, "candles", {})
-                                   .get(coin, [])})
+                return self._json(200, {"candles":
+                    getattr(api_state, "candles", {}).get(coin, [])})
             if self.path == "/chain/latest":
                 if chain is None:
                     return self._json(404, {"error": "no_chain"})
@@ -830,10 +822,7 @@ def make_server(api_state, chain=None, host="127.0.0.1", port=0):
             if self.path.startswith("/block/"):
                 if chain is None:
                     return self._json(404, {"error": "no_chain"})
-                try:
-                    h = int(self.path.split("/block/")[1].split("?")[0])
-                except ValueError:
-                    return self._json(400, {"error": "bad_block"})
+                h = int(self.path.split("/block/")[1].split("?")[0])
                 return self._json(200, chain.to_json(h))
             if self.path.startswith("/events"):
                 since = 0
