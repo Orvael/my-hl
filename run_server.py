@@ -7,6 +7,7 @@ import os
 import time
 import threading
 import json
+import random
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hl.engine import Engine            # noqa: E402
@@ -33,8 +34,28 @@ ASSETS = {"BTC": {"max_leverage": 40, "sz_decimals": 5,
                    "impact_notional_usd": 6_000 * S},
           "HYPE": {"max_leverage": 10, "sz_decimals": 2,
                    "impact_notional_usd": 6_000 * S}}
-SEED_MIDS = {"BTC": 82_000, "ETH": 3_150, "SOL": 148, "XRP": 2.4,
-             "DOGE": 0.16, "HYPE": 28}
+# Real prices, fetched live from Hyperliquid's public API at boot (one call,
+# no RPC drain). Offline fallback = last known values.
+def fetch_real_mids():
+    fallback = {"BTC": 82_000, "ETH": 2_490, "SOL": 110, "XRP": 1.39,
+                "DOGE": 0.085, "HYPE": 85}
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "https://api.hyperliquid.xyz/info",
+            data=json.dumps({"type": "allMids"}).encode(),
+            headers={"Content-Type": "application/json",
+                     "User-Agent": "Mozilla/5.0"})
+        out = json.loads(urllib.request.urlopen(req, timeout=8).read())
+        return {c: float(out[c]) for c in ASSETS if c in out}
+    except Exception:
+        return {}
+
+
+_REAL = fetch_real_mids()
+_FALLBACK = {"BTC": 82_000, "ETH": 2_490, "SOL": 110, "XRP": 1.39,
+             "DOGE": 0.085, "HYPE": 85}
+SEED_MIDS = {**_FALLBACK, **_REAL}
 
 
 def q5(px):
@@ -109,13 +130,28 @@ def main():
                 e.apply_block(0, [a])
                 chain.submit(0, [a])
 
+    # candle history: 240 minutes of seeded walk so charts open with depth
+    api.candles = {c: [] for c in ASSETS}
+    for coin in ASSETS:
+        px = SEED_MIDS[coin]
+        t0 = int(time.time() * 1000) // 60000 * 60000 - 240 * 60000
+        rng2 = random.Random(hash(coin) % 9999)
+        for i in range(240):
+            o = px
+            steps = [rng2.gauss(0, px / 400) for _ in range(12)]
+            h = px + max(max(steps), 0)
+            l = px + min(min(steps), 0)
+            px = max(px + steps[-1], px // 100)
+            api.candles[coin].append(
+                {"t": (t0 + i * 60000) // 1000, "o": round(o, 6),
+                 "h": round(h, 6), "l": round(l, 6), "c": round(px, 6)})
+
     srv = make_server(api, chain=chain, host="0.0.0.0", port=PORT)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     print("my-hl testnet on 0.0.0.0:%d  (UI at http://localhost:%d/)"
           % (PORT, PORT), flush=True)
 
     # --- market simulation: sim_bot random-walk taker + lp_bot re-quotes ---
-    import random
     rng = random.Random(20261008)
     api.rate_limit = 100_000
     seed2 = [{"t": "deposit", "user": "sim_bot", "usd": 20_000_000 * S},
@@ -206,6 +242,27 @@ def main():
                             {"coin": coin, "is_buy": is_buy,
                              "limit_px": px_off, "sz": 50 * S,
                              "tif": "ALO"}]})
+        # live candle updates per market
+        for coin in ASSETS:
+            cstore = api.candles[coin]
+            if not cstore:
+                continue
+            cm = e.books[coin].mid()
+            if cm is None:
+                continue
+            px = cm / 1e8
+            mnow = int(time.time() * 1000) // 60000 * 60000 // 1000
+            last = cstore[-1]
+            if last["t"] != mnow:
+                cstore.append({"t": mnow, "o": last["c"], "h": max(last["c"], px),
+                               "l": min(last["c"], px), "c": round(px, 6)})
+                if len(cstore) > 600:
+                    cstore.pop(0)
+            else:
+                last["h"] = max(last["h"], px)
+                last["l"] = min(last["l"], px)
+                last["c"] = round(px, 6)
+
         # --- block production: atomic drain + passes + submit ---
         # The leader (api engine) applied actions at dispatch; the passes run
         # here under the same lock and timestamp as the replicas' apply_block,

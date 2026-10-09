@@ -624,8 +624,9 @@ def make_server(api_state, chain=None, host="127.0.0.1", port=0):
     POST /info, POST /exchange, GET /events?since=N, GET /chain/latest,
     GET /block/{h}, GET /health. Port 0 = ephemeral (for tests)."""
     import os
-    static_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               "static", "index.html")
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "static")
+    static_path = os.path.join(static_dir, "index.html")
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -635,6 +636,13 @@ def make_server(api_state, chain=None, host="127.0.0.1", port=0):
             body = json.dumps(obj).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _resp(self, code, body, ctype):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -787,11 +795,21 @@ def make_server(api_state, chain=None, host="127.0.0.1", port=0):
             if self.path == "/ws":
                 self._ws_upgrade()
                 return
+            if self.path == "/static/lwc.js":
+                with open(static_dir + "/lwc.js", "rb") as fp:
+                    return self._resp(200, fp.read(), "application/javascript")
             if self.path == "/" or self.path.startswith("/index"):
                 with open(static_path, "rb") as fp:
                     return self._html(200, fp.read())
             if self.path == "/health":
                 return self._json(200, {"status": "ok"})
+            if self.path.startswith("/candles"):
+                coin = "BTC"
+                if "coin=" in self.path:
+                    coin = self.path.split("coin=")[1].split("&")[0]
+                return self._json(200,
+                                  {"candles": getattr(api_state, "candles", {})
+                                   .get(coin, [])})
             if self.path == "/chain/latest":
                 if chain is None:
                     return self._json(404, {"error": "no_chain"})

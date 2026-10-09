@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>my-hl · trade anything</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%2350d2c1'/%3E%3Ctext x='8' y='12' font-size='10' font-weight='bold' text-anchor='middle' fill='%2304211d'%3EH%3C/text%3E%3C/svg%3E">
-<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<script src="/static/lwc.js"></script>
 <style>
 :root{
   --bg:#080b10; --p1:#0f141b; --p2:#151c26; --p3:#1b2431;
@@ -277,9 +277,10 @@ tbody tr:hover td,tr:hover td{background:rgba(255,255,255,.025)}
         <div class="lev" id="pcts"></div>
         <select id="tif"><option>GTC</option><option>IOC</option><option>ALO</option></select>
         <div style="display:flex;gap:6px">
-          <button class="btn" style="background:var(--up);flex:1" onclick="send(1)">Buy</button>
-          <button class="btn" style="background:var(--dn);flex:1" onclick="send(0)">Sell</button>
-        </div><div id="msg" class="note" style="margin-top:6px"></div>
+          <button class="btn" style="background:var(--up);flex:1" onclick="mkt(1)">Market Buy</button>
+          <button class="btn" style="background:var(--dn);flex:1" onclick="mkt(0)">Market Sell</button>
+        </div>
+        <div class="note" style="margin:4px 0 6px;text-align:center">— or limit —</div><div id="msg" class="note" style="margin-top:6px"></div>
       </div>
       <div class="panel" style="margin-top:10px">
         <div class="tabs">
@@ -405,6 +406,14 @@ tbody tr:hover td,tr:hover td{background:rgba(255,255,255,.025)}
 <div id="toast" style="display:none"></div>
 <script>
 var ME = localStorage.getItem('myhl_user') || null;
+var SZD_BY_COIN = {BTC: 5, ETH: 4, SOL: 2, XRP: 1, DOGE: 0, HYPE: 2};
+function tickOf(coin, raw){
+  // real rule: <=5 significant figures AND <= (6 - szDecimals) decimals
+  var sd = (SZD_BY_COIN[coin] !== undefined) ? SZD_BY_COIN[coin] : 2;
+  var decTick = Math.pow(10, -(6 - sd));
+  if (!raw) return decTick;
+  var mag = Math.pow(10, Math.floor(Math.log10(Math.abs(raw))) - 4);
+  return Math.max(decTick, mag);   // whichever granularity is coarser
 var lastMid = null, candles = [], chart = null, series = null;
 var $ = id => document.getElementById(id);
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>
@@ -427,6 +436,13 @@ document.querySelectorAll('nav a[data-p]').forEach(a => {
   };
 });
 
+function loadHistory(){
+  fetch('/candles?coin=' + COIN).then(r=>r.json()).then(d=>{
+    if (!d.candles || !d.candles.length) return;
+    candles = d.candles.map(c=>({time:c.t, open:c.o, high:c.h, low:c.l, close:c.c}));
+    if (series) series.setData(candles);
+  }).catch(()=>{});
+}
 function initChart(){
   if (typeof LightweightCharts === 'undefined') return;
   chart = LightweightCharts.createChart($('chart'), {
@@ -443,7 +459,25 @@ function initChart(){
     height:400});
   series = chart.addCandlestickSeries({upColor:'#0ecb81',downColor:'#f6465d',
     borderVisible:false,wickUpColor:'#0ecb81',wickDownColor:'#f6465d'});
+  entryLine = null;
 }
+
+var entryLine = null, lastEntryPx = null;
+function drawEntry(){
+  if (!series) return;
+  api('/info',{type:'userState',user:ME},s=>{
+    if (!s.assetPositions || !s.assetPositions.length){
+      if (entryLine){ series.removePriceLine(entryLine); entryLine=null; }
+      return; }
+    var q = s.assetPositions[0].position;
+    var px = parseFloat(q.entryPx);
+    if (!px || px === lastEntryPx) return;
+    if (entryLine) series.removePriceLine(entryLine);
+    entryLine = series.createPriceLine({price:px,
+      color:(parseFloat(q.szi)>=0?'#0ecb81':'#f6465d'),
+      lineWidth:1, lineStyle:2, title:'ENTRY '+q.szi});
+    lastEntryPx = px;
+  });
 function pushCandle(t, px){
   RAW.push([t, px]); if (RAW.length>3600) RAW.shift();
   var m = Math.floor(t/TF)*TF;
@@ -725,6 +759,27 @@ function xfer(toPerp){
     depRefresh();});
 }
 function setpx(f){ if(lastMid) $('px_in').value = (lastMid*f).toFixed(1); }
+function mkt(is_buy){
+  requireAuth(()=>{
+    var sz = parseFloat($('sz_in').value||'0');
+    if (!sz) { // default size: 0.01 BTC worth ~$500 at the mid
+      sz = Math.max(0.01, Math.round(500 / (lastMid||100) * 100)/100);
+      $('sz_in').value = sz;
+    }
+    var raw = (lastMid||0) * (is_buy?1.01:0.99);
+    var tick = tickOf(COIN, raw);
+    var px = Math.round(Math.round(raw / tick) * tick * 1e8);
+    if (!px) return toast('waiting for market data');
+    api('/exchange',{action:{type:'order',orders:[{coin:COIN,is_buy:is_buy,
+      limit_px:px,sz:Math.round(sz*1e8),tif:'IOC'}]},nonce:Date.now(),
+      signature:{signer:ME}},r=>{
+      if (r.status==='ok' && r.response.statuses[0].status==='filled')
+        toast('MARKET '+(is_buy?'BUY':'SELL')+' '+sz+' '+COIN+' filled');
+      else if (r.status==='ok') toast('order: '+r.response.statuses[0].status);
+      else toast('error: '+r.response);
+      refresh(); });
+  });
+}
 ['0.995','1','1.005'].forEach((f,i)=>{
   var d=document.createElement('div'); d.textContent=(f==='1'?'MID':(i?'+0.5%':'-0.5%'));
   d.onclick=()=>setpx(parseFloat(f)); $('levs').appendChild(d); });
@@ -741,7 +796,9 @@ function setPct(p){
   d.onclick=()=>setPct([.25,.5,.75,1][i]); $('pcts').appendChild(d); });
 function send(is_buy){
   requireAuth(() => {
-    var px = Math.round(parseFloat($('px_in').value||'0')*1e8);
+    var raw = parseFloat($('px_in').value||'0');
+    var tick = tickOf(COIN, raw);
+    var px = Math.round(Math.round(raw / tick) * tick * 1e8);
     var sz = Math.round(parseFloat($('sz_in').value||'0')*1e8);
     if (!px||!sz) return toast('price and size required');
     api('/exchange',{action:{type:'order',orders:[{coin:COIN,is_buy:!!is_buy,
@@ -775,7 +832,8 @@ function refresh(){
       t+='<table><tr><th>coin</th><th>size</th><th>entry</th><th>uPnL</th></tr><tr><td>'+
       q.coin+'</td><td class="'+(parseFloat(q.szi)>=0?'b':'a')+'">'+q.szi+'</td><td>'+q.entryPx+
       '</td><td class="'+(parseFloat(q.unrealizedPnl)>=0?'b':'a')+'">'+q.unrealizedPnl+'</td></tr></table>';});
-    $('pos').innerHTML = t || '<div class="note">no open positions</div>';});
+    $('pos').innerHTML = t || '<div class="note">no open positions</div>';
+    drawEntry();});
   api('/info',{type:'openOrders',user:ME},oo=>{
     var t='<table><tr><th>oid</th><th>side</th><th>px</th><th>sz</th><th></th></tr>';
     (oo||[]).forEach(o=>{t+='<tr><td>'+o.oid+'</td><td class="'+(o.side==='B'?'b':'a')+'">'+
@@ -887,7 +945,7 @@ function refreshPage(){
 var _origRefresh = refresh;
 refresh = function(){ _origRefresh(); refreshPage(); };
 if (ME) signed_ui();
-initChart(); ws(); backfill(); refresh(); setInterval(refresh, 3000);
+initChart(); loadHistory(); ws(); backfill(); refresh(); setInterval(refresh, 3000);
 </script>
 </body>
 </html>
