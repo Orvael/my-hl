@@ -546,6 +546,13 @@ class ApiState:
             self.spot._add(user, 0, 10_000 * 10 ** 8)
             self.faucet_given.add(user)
             return {"status": "ok", "response": "spot_usdc_10000"}
+        if t == "botTopUp":
+            """Internal: keeps sim bots funded; logged as a plain deposit."""
+            amt = int(action.get("amount", 10_000_000 * 10 ** 8))
+            self.engine.deposit(user, amt)
+            if eng is not None:
+                eng.append({"t": "deposit", "user": user, "usd": amt})
+            return {"status": "ok", "response": "topped_up"}
         if t == "oracle":
             self.engine.set_oracle(action["coin"], int(action["px"]))
             if eng is not None:

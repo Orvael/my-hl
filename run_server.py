@@ -256,7 +256,7 @@ def main():
             marks = {c: e.mark(c) for c in ASSETS}
             for bname in ("sim_bot", "lp_bot"):
                 if e.ch.account_value(e.ch.acc(bname), marks) < 2_000_000 * S:
-                    e.deposit(bname, 10_000_000 * S)
+                    bot(bname, {"type": "botTopUp", "amount": 10_000_000 * S})
         # live candle updates per market
         for coin in ASSETS:
             cstore = api.candles[coin]
